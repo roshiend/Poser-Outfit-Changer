@@ -7,6 +7,7 @@ Loads at most one diffusion checkpoint at a time:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Literal, Optional, Tuple, Union
@@ -27,6 +28,10 @@ from .memory import cuda_mem_report, free_vram
 PathLike = Union[str, Path, Image.Image]
 Mode = Literal["both", "outfit_only", "pose_only"]
 RefKind = Literal["clothed_person", "flat_garment"]
+
+
+def _in_colab() -> bool:
+    return Path("/content").exists()
 
 
 def _ensure_leffa_on_path(leffa_root: Path) -> None:
@@ -67,6 +72,8 @@ class PoseClothPipeline:
         self.enable_face_lock = enable_face_lock
         self.default_ref_kind = default_ref_kind
         self.preserve_body = preserve_body
+        # Free Colab: VTON (SD1.5) can work; pose (SDXL) usually kills the kernel.
+        self.colab_safe = _in_colab() and os.environ.get("LEFFA_ALLOW_POSE", "").strip() != "1"
 
         _ensure_leffa_on_path(self.leffa_root)
 
@@ -161,35 +168,59 @@ class PoseClothPipeline:
         free_vram()
         cuda_mem_report("after diffusion unload")
 
+    def _build_leffa_model(self, pretrained_dir: str, weight_path: str):
+        """Load Leffa weights with lower CPU RAM peaks, then free caches."""
+        import gc
+
+        import torch
+        from leffa.model import LeffaModel
+
+        print(f"[load] Reading checkpoint: {weight_path}")
+        original_load = torch.load
+
+        def _safe_load(*args, **kwargs):
+            kwargs.setdefault("map_location", "cpu")
+            obj = original_load(*args, **kwargs)
+            gc.collect()
+            return obj
+
+        torch.load = _safe_load  # type: ignore[assignment]
+        try:
+            model = LeffaModel(
+                pretrained_model_name_or_path=pretrained_dir,
+                pretrained_model=weight_path,
+                dtype=self.dtype,
+            )
+        finally:
+            torch.load = original_load  # type: ignore[assignment]
+        gc.collect()
+        free_vram()
+        return model
+
     def _load_vton(self, model_type: str = "viton_hd") -> None:
         if self._active_model == f"vton_{model_type}" and self._vt_inference is not None:
             return
         self._unload_diffusion()
 
         print(f"[load] Loading VTON ({model_type}) — may take 1–3 min on Colab...")
-        print("[load] If Gradio shows 'Broken Connection', wait here; the notebook job is still loading.")
+        print("[load] If Gradio shows 'Broken Connection', watch this notebook log.")
         cuda_mem_report("before VTON load")
 
         from leffa.inference import LeffaInference
-        from leffa.model import LeffaModel
 
         weight = (
             self.ckpt_dir / "virtual_tryon.pth"
             if model_type == "viton_hd"
             else self.ckpt_dir / "virtual_tryon_dc.pth"
         )
-        print("[load] Building LeffaModel (reading weights)...")
-        model = LeffaModel(
-            pretrained_model_name_or_path=str(
-                self.ckpt_dir / "stable-diffusion-inpainting"
-            ),
-            pretrained_model=str(weight),
-            dtype=self.dtype,
+        model = self._build_leffa_model(
+            str(self.ckpt_dir / "stable-diffusion-inpainting"),
+            str(weight),
         )
-        free_vram()
         print("[load] Moving VTON to GPU...")
         self._vt_inference = LeffaInference(model=model)
         self._active_model = f"vton_{model_type}"
+        free_vram()
         cuda_mem_report("after VTON load")
         print(f"[load] VTON ready: {model_type}")
 
@@ -198,36 +229,33 @@ class PoseClothPipeline:
             return
         self._unload_diffusion()
 
-        print("[load] Loading pose-transfer model — may take 1–3 min on Colab...")
-        print("[load] If Gradio shows 'Broken Connection', wait here; loading continues in this notebook.")
+        print("[load] Loading pose-transfer (SDXL) — heavy; may OOM on free Colab...")
         cuda_mem_report("before pose load")
 
         from leffa.inference import LeffaInference
-        from leffa.model import LeffaModel
 
-        print("[load] Building pose LeffaModel (SDXL — heavier)...")
-        model = LeffaModel(
-            pretrained_model_name_or_path=str(
-                self.ckpt_dir / "stable-diffusion-xl-1.0-inpainting-0.1"
-            ),
-            pretrained_model=str(self.ckpt_dir / "pose_transfer.pth"),
-            dtype=self.dtype,
+        model = self._build_leffa_model(
+            str(self.ckpt_dir / "stable-diffusion-xl-1.0-inpainting-0.1"),
+            str(self.ckpt_dir / "pose_transfer.pth"),
         )
-        free_vram()
         print("[load] Moving pose model to GPU...")
         self._pt_inference = LeffaInference(model=model)
         self._active_model = "pose"
+        free_vram()
         cuda_mem_report("after pose load")
         print("[load] Pose-transfer model ready")
 
     def preload_colab(self, include_pose: bool = False) -> None:
-        """Load diffusion weights in a notebook cell before opening Gradio."""
-        print("[preload] Warming VTON so Gradio does not time out on first click...")
+        """Optional warmup. Skip on free Colab if it previously crashed the kernel."""
+        if self.colab_safe and not include_pose:
+            print("[preload] Skipping auto-preload on free Colab (prevents RAM OOM).")
+            print("[preload] VTON will load on first Generate instead.")
+            return
+        print("[preload] Warming VTON...")
         self._load_vton("viton_hd")
         if include_pose:
-            print("[preload] Also warming pose model...")
             self._load_pose()
-        print("[preload] Done. Launch Gradio and generate.")
+        print("[preload] Done.")
 
     def _get_face_app(self):
         if self._face_app is not None:
@@ -374,6 +402,21 @@ class PoseClothPipeline:
         do_face = self.enable_face_lock if face_lock is None else face_lock
         do_body = self.preserve_body if preserve_body is None else preserve_body
         debug: dict = {}
+
+        # Free Colab cannot reliably run SD1.5 VTON + SDXL pose in one session.
+        if self.colab_safe and mode in ("both", "pose_only"):
+            print(
+                "[colab] Free Colab kernel OOM risk: pose model is SDXL.\n"
+                "[colab] Switching to Outfit only (keeps your face/body, changes clothes).\n"
+                "[colab] To force pose anyway: Runtime cell → "
+                "import os; os.environ['LEFFA_ALLOW_POSE']='1' then recreate pipe."
+            )
+            if mode == "pose_only":
+                raise RuntimeError(
+                    "Pose-only is disabled on free Colab by default (SDXL OOM). "
+                    "Set LEFFA_ALLOW_POSE=1 to override."
+                )
+            mode = "outfit_only"
 
         base = resize_and_center(base, 768, 1024)
         ref = resize_and_center(ref, 768, 1024)
