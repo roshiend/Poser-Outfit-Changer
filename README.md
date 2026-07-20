@@ -1,5 +1,9 @@
 # Pose & Cloth Swap — Free Google Colab App
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)
+
+**[▶ Open in Google Colab (one click)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)**
+
 Transfer **pose + outfit** from a reference image onto a **base person**, while keeping face identity and body proportions as consistent as possible.
 
 **Cost: $0** — free Google Colab T4 GPU + open-source [Leffa](https://github.com/franciszzj/Leffa) models + InsightFace face lock.
@@ -28,8 +32,7 @@ Base person  +  Pose & Outfit ref
 
 ## Quick start (Google Colab)
 
-1. Open [`Pose_Cloth_Changer.ipynb`](Pose_Cloth_Changer.ipynb) in [Google Colab](https://colab.research.google.com/)  
-   - Upload the notebook, **or** File → Upload notebook from this folder.
+1. Click **[Open in Colab](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)** (badge at the top of this README).
 2. **Runtime → Change runtime type → T4 GPU** (required).
 3. **Runtime → Run all** (or run cells top to bottom).
 4. Wait for weight download on the first run (several GB).
