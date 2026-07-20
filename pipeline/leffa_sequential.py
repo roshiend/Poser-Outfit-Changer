@@ -106,9 +106,10 @@ class PoseClothPipeline:
         self._densepose = self._make_densepose()
 
     def _make_densepose(self):
-        """Prefer real DensePose; fall back if detectron2 _C is missing (common on Colab)."""
+        """Prefer real DensePose; fall back if detectron2/av are missing (common on Colab)."""
         ckpt = self.ckpt_dir
         try:
+            import av  # noqa: F401  # required by Leffa densepose data stack
             import detectron2  # noqa: F401
             from detectron2 import _C  # noqa: F401
             from leffa_utils.densepose_predictor import DensePosePredictor
@@ -120,7 +121,7 @@ class PoseClothPipeline:
             print("[densepose] Using Detectron2 DensePose")
             return pred
         except Exception as exc:
-            print(f"[densepose] Detectron2 unavailable ({exc!r}); using fallback")
+            print(f"[densepose] Real DensePose unavailable ({exc!r}); using fallback")
             from .densepose_fallback import FallbackDensePosePredictor
 
             return FallbackDensePosePredictor(parsing_fn=self._parsing)
