@@ -166,6 +166,10 @@ class PoseClothPipeline:
             return
         self._unload_diffusion()
 
+        print(f"[load] Loading VTON ({model_type}) — may take 1–3 min on Colab...")
+        print("[load] If Gradio shows 'Broken Connection', wait here; the notebook job is still loading.")
+        cuda_mem_report("before VTON load")
+
         from leffa.inference import LeffaInference
         from leffa.model import LeffaModel
 
@@ -174,6 +178,7 @@ class PoseClothPipeline:
             if model_type == "viton_hd"
             else self.ckpt_dir / "virtual_tryon_dc.pth"
         )
+        print("[load] Building LeffaModel (reading weights)...")
         model = LeffaModel(
             pretrained_model_name_or_path=str(
                 self.ckpt_dir / "stable-diffusion-inpainting"
@@ -181,18 +186,26 @@ class PoseClothPipeline:
             pretrained_model=str(weight),
             dtype=self.dtype,
         )
+        free_vram()
+        print("[load] Moving VTON to GPU...")
         self._vt_inference = LeffaInference(model=model)
         self._active_model = f"vton_{model_type}"
-        print(f"Loaded VTON model: {model_type}")
+        cuda_mem_report("after VTON load")
+        print(f"[load] VTON ready: {model_type}")
 
     def _load_pose(self) -> None:
         if self._active_model == "pose" and self._pt_inference is not None:
             return
         self._unload_diffusion()
 
+        print("[load] Loading pose-transfer model — may take 1–3 min on Colab...")
+        print("[load] If Gradio shows 'Broken Connection', wait here; loading continues in this notebook.")
+        cuda_mem_report("before pose load")
+
         from leffa.inference import LeffaInference
         from leffa.model import LeffaModel
 
+        print("[load] Building pose LeffaModel (SDXL — heavier)...")
         model = LeffaModel(
             pretrained_model_name_or_path=str(
                 self.ckpt_dir / "stable-diffusion-xl-1.0-inpainting-0.1"
@@ -200,9 +213,21 @@ class PoseClothPipeline:
             pretrained_model=str(self.ckpt_dir / "pose_transfer.pth"),
             dtype=self.dtype,
         )
+        free_vram()
+        print("[load] Moving pose model to GPU...")
         self._pt_inference = LeffaInference(model=model)
         self._active_model = "pose"
-        print("Loaded pose-transfer model")
+        cuda_mem_report("after pose load")
+        print("[load] Pose-transfer model ready")
+
+    def preload_colab(self, include_pose: bool = False) -> None:
+        """Load diffusion weights in a notebook cell before opening Gradio."""
+        print("[preload] Warming VTON so Gradio does not time out on first click...")
+        self._load_vton("viton_hd")
+        if include_pose:
+            print("[preload] Also warming pose model...")
+            self._load_pose()
+        print("[preload] Done. Launch Gradio and generate.")
 
     def _get_face_app(self):
         if self._face_app is not None:
