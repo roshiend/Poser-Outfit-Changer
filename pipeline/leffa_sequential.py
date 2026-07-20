@@ -15,10 +15,12 @@ import numpy as np
 from PIL import Image
 
 from .face_lock import lock_face_identity
+from .garment_extract import extract_garment_from_person
 from .memory import free_vram
 
 PathLike = Union[str, Path, Image.Image]
 Mode = Literal["both", "outfit_only", "pose_only"]
+RefKind = Literal["clothed_person", "flat_garment"]
 
 
 def _ensure_leffa_on_path(leffa_root: Path) -> None:
@@ -40,7 +42,8 @@ class PoseClothPipeline:
     Inputs
     ------
     base_image : person whose face / body proportions must stay consistent
-    ref_image  : source of outfit and/or pose
+    ref_image  : usually a **person wearing clothes** (pose + outfit source).
+                 Flat product garment photos also work if ref_kind='flat_garment'.
     """
 
     def __init__(
@@ -49,11 +52,13 @@ class PoseClothPipeline:
         ckpt_dir: str | Path | None = None,
         dtype: str = "float16",
         enable_face_lock: bool = True,
+        default_ref_kind: RefKind = "clothed_person",
     ) -> None:
         self.leffa_root = Path(leffa_root)
         self.ckpt_dir = Path(ckpt_dir) if ckpt_dir else self.leffa_root / "ckpts"
         self.dtype = dtype
         self.enable_face_lock = enable_face_lock
+        self.default_ref_kind = default_ref_kind
 
         _ensure_leffa_on_path(self.leffa_root)
 
@@ -162,6 +167,26 @@ class PoseClothPipeline:
             self._face_app = False
         return self._face_app if self._face_app is not False else None
 
+    def _garment_ref_from_clothed_person(
+        self,
+        person: Image.Image,
+        garment_type: str,
+    ) -> Image.Image:
+        """Parse a clothed person and isolate their outfit for VTON."""
+        from leffa_utils.utils import resize_and_center
+
+        self._load_preprocessors()
+        person = resize_and_center(person.convert("RGB"), 768, 1024)
+        parse_map, _ = self._parsing(person.resize((384, 512)))
+        garment = extract_garment_from_person(
+            person_rgb=person,
+            parse_map=parse_map,
+            garment_type=garment_type,
+            out_size=(768, 1024),
+        )
+        print(f"[garment] Extracted {garment_type} clothing from clothed-person ref")
+        return garment
+
     # --------------------------------------------------------------- inference
     def _run_control(
         self,
@@ -242,10 +267,15 @@ class PoseClothPipeline:
         seed: int = 42,
         ref_acceleration: bool = True,
         face_lock: Optional[bool] = None,
+        ref_kind: Optional[RefKind] = None,
         return_debug: bool = False,
     ) -> Image.Image | Tuple[Image.Image, dict]:
         """
         Run outfit and/or pose transfer.
+
+        Default ref_kind='clothed_person': the pose/outfit image is a person
+        wearing clothes. Clothing is parsed out for VTON; the full person
+        image is still used for pose transfer.
 
         Leffa pose-transfer convention
         ------------------------------
@@ -254,6 +284,7 @@ class PoseClothPipeline:
         """
         base = _as_pil(base_image)
         ref = _as_pil(ref_image)
+        kind = ref_kind or self.default_ref_kind
         do_face = self.enable_face_lock if face_lock is None else face_lock
         debug: dict = {}
 
@@ -261,10 +292,15 @@ class PoseClothPipeline:
 
         if mode in ("both", "outfit_only"):
             print("Step 1/2: Outfit transfer (VTON) — clothes from ref onto base...")
-            # Person = base, garment/person-wearing-clothes = ref
+            if kind == "clothed_person":
+                vton_ref = self._garment_ref_from_clothed_person(ref, garment_type)
+                debug["garment_ref"] = vton_ref.copy()
+            else:
+                vton_ref = ref
+            # Person = base; garment ref = extracted clothes (or flat garment)
             current = self._run_control(
                 src_image=current,
-                ref_image=ref,
+                ref_image=vton_ref,
                 control_type="virtual_tryon",
                 step=steps,
                 scale=guidance_scale,
@@ -275,7 +311,6 @@ class PoseClothPipeline:
             )
             debug["after_vton"] = current.copy()
             self._unload_diffusion()
-
         if mode in ("both", "pose_only"):
             print("Step 2/2: Pose transfer — appearance from dressed base, pose from ref...")
             # Appearance = current (base or dressed), pose = ref

@@ -6,18 +6,21 @@
 
 Transfer **pose + outfit** from a reference image onto a **base person**, while keeping face identity and body proportions as consistent as possible.
 
+**Typical inputs:** base person (identity) + another **person wearing clothes** (pose + outfit). Flat garment photos are optional.
+
 **Cost: $0** — free Google Colab T4 GPU + open-source [Leffa](https://github.com/franciszzj/Leffa) models + InsightFace face lock.
 
 ## How it works
 
 ```
-Base person  +  Pose & Outfit ref
+Base person  +  Clothed person (pose + outfit)
        │                │
+       │                ├── parse & extract clothes
        ▼                ▼
-  Leffa VTON  ←——  clothes from ref
+  Leffa VTON  ←——  garment from clothed ref
        │
        ▼
-  Leffa Pose  ←——  pose from ref, appearance from dressed base
+  Leffa Pose  ←——  pose from clothed ref, appearance from dressed base
        │
        ▼
   Face identity lock (InsightFace)
@@ -26,9 +29,10 @@ Base person  +  Pose & Outfit ref
      Result
 ```
 
-1. **Outfit transfer** — put reference clothes on the base person (face/body stay on the base frame).
-2. **Pose transfer** — move the dressed base into the reference pose.
-3. **Face lock** — re-apply the base face after pose warping so identity stays consistent.
+1. **Extract outfit** — isolate clothing from the clothed reference person (default).
+2. **Outfit transfer** — put those clothes on the base person.
+3. **Pose transfer** — move the dressed base into the reference pose.
+4. **Face lock** — re-apply the base face after pose warping.
 
 ## Quick start (Google Colab)
 
