@@ -78,6 +78,7 @@ The notebook writes the same `pipeline/` helpers into `/content` so you can run 
 
 ## Free-tier tips
 
+- **Free Colab:** use **Outfit only** (default). Pose/Both uses SDXL and often restarts the kernel.
 - **First run is slow** — models download from Hugging Face once per session.
 - **Session disconnects** — Colab free runtimes time out; re-run install + download cells after reconnect.
 - **CUDA out of memory** — switch to *Outfit only* or *Pose only*, or lower steps to ~20. The pipeline unloads each diffusion model between stages to fit ~15GB T4 VRAM.
