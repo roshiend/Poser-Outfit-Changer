@@ -1,0 +1,26 @@
+# Reference deps for local / Colab notes.
+# On Colab, the notebook installs packages directly (torch is preinstalled).
+
+accelerate
+cloudpickle
+diffusers
+einops
+fvcore
+gradio
+huggingface_hub
+imageio
+insightface
+matplotlib
+numpy<2
+omegaconf
+onnx
+onnxruntime-gpu
+opencv-python-headless
+peft
+pycocotools
+regex
+safetensors
+scikit-image
+scipy
+timm
+transformers

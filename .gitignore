@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+Leffa/
+ckpts/
+outputs/
+*.pth
+*.onnx
+*.pkl
+.DS_Store
+Thumbs.db

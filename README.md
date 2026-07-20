@@ -1,0 +1,93 @@
+# Pose & Cloth Swap — Free Google Colab App
+
+Transfer **pose + outfit** from a reference image onto a **base person**, while keeping face identity and body proportions as consistent as possible.
+
+**Cost: $0** — free Google Colab T4 GPU + open-source [Leffa](https://github.com/franciszzj/Leffa) models + InsightFace face lock.
+
+## How it works
+
+```
+Base person  +  Pose & Outfit ref
+       │                │
+       ▼                ▼
+  Leffa VTON  ←——  clothes from ref
+       │
+       ▼
+  Leffa Pose  ←——  pose from ref, appearance from dressed base
+       │
+       ▼
+  Face identity lock (InsightFace)
+       │
+       ▼
+     Result
+```
+
+1. **Outfit transfer** — put reference clothes on the base person (face/body stay on the base frame).
+2. **Pose transfer** — move the dressed base into the reference pose.
+3. **Face lock** — re-apply the base face after pose warping so identity stays consistent.
+
+## Quick start (Google Colab)
+
+1. Open [`Pose_Cloth_Changer.ipynb`](Pose_Cloth_Changer.ipynb) in [Google Colab](https://colab.research.google.com/)  
+   - Upload the notebook, **or** File → Upload notebook from this folder.
+2. **Runtime → Change runtime type → T4 GPU** (required).
+3. **Runtime → Run all** (or run cells top to bottom).
+4. Wait for weight download on the first run (several GB).
+5. Click the **public Gradio link** (`*.gradio.live`) when the last cell finishes.
+6. Upload:
+   - **Base image** — the person whose face/body you want to keep
+   - **Pose & Outfit image** — the pose and clothes to copy
+7. Choose mode (**Both** recommended) → **Generate** → download the PNG.
+
+## UI options
+
+| Control | Meaning |
+|---------|---------|
+| Mode: Both | Outfit then pose then face lock (full swap) |
+| Mode: Outfit only | Change clothes only, keep base pose |
+| Mode: Pose only | Change pose only, keep base clothes |
+| Garment region | Upper / Lower / Dress — which area VTON replaces |
+| Face identity lock | Paste/refine base face onto the result |
+| Steps / seed | Quality vs speed; seed for reproducibility |
+
+## Project layout
+
+```
+Pose&Cloth Changer/
+├── Pose_Cloth_Changer.ipynb   # Main Colab notebook (self-contained)
+├── README.md
+└── pipeline/
+    ├── __init__.py
+    ├── face_lock.py           # InsightFace face identity lock
+    ├── leffa_sequential.py    # VTON → pose → face, one model in VRAM at a time
+    └── memory.py              # CUDA cache cleanup
+```
+
+The notebook writes the same `pipeline/` helpers into `/content` so you can run from Colab without uploading the whole repo. The local `pipeline/` folder is the editable source of truth.
+
+## Free-tier tips
+
+- **First run is slow** — models download from Hugging Face once per session.
+- **Session disconnects** — Colab free runtimes time out; re-run install + download cells after reconnect.
+- **CUDA out of memory** — switch to *Outfit only* or *Pose only*, or lower steps to ~20. The pipeline unloads each diffusion model between stages to fit ~15GB T4 VRAM.
+- **Better face consistency** — use a clear, well-lit base photo with a visible face; keep Face lock enabled.
+- **Better clothes transfer** — full-body shots work best; set garment region to match (upper / lower / dress).
+- Optional: mount Google Drive and point `ckpt_dir` there so weights survive session resets.
+
+## Requirements (Colab installs these for you)
+
+- NVIDIA GPU (Colab T4 is enough)
+- PyTorch (preinstalled on Colab)
+- Leffa + detectron2 + InsightFace + Gradio
+
+## Limits (honest)
+
+Diffusion models cannot guarantee literal pixel-perfect “100%” identity. This app maximizes consistency with a staged pipeline and a face-lock pass. Results vary with lighting, occlusion, extreme poses, and resolution.
+
+Models used for try-on/pose are trained on academic datasets (VITON-HD / DressCode / DeepFashion). Use for personal / research purposes; check upstream licenses before commercial use.
+
+## Credits
+
+- [Leffa](https://github.com/franciszzj/Leffa) — pose transfer & virtual try-on  
+- [InsightFace](https://github.com/deepinsight/insightface) — face detection / identity lock  
+- DensePose / SCHP / OpenPose — preprocessing (via Leffa)
