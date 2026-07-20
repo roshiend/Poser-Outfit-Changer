@@ -34,14 +34,15 @@ Base person  +  Pose & Outfit ref
 
 1. Click **[Open in Colab](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)** (badge at the top of this README).
 2. **Runtime → Change runtime type → T4 GPU** (required).
-3. **Runtime → Run all** (or run cells top to bottom).
-4. If an install cell asks you to **restart the runtime**, restart, then continue from section 3.
-5. Wait for weight download on the first run (several GB).
-6. Click the **public Gradio link** (`*.gradio.live`) when the last cell finishes.
-7. Upload:
+3. **Runtime → Run all** (section 1 installs packages *before* importing them — you should not need Restart session).
+4. Wait for weight download on the first run (several GB).
+5. Click the **public Gradio link** (`*.gradio.live`) when the last cell finishes.
+6. Upload:
    - **Base image** — the person whose face/body you want to keep
    - **Pose & Outfit image** — the pose and clothes to copy
-8. Choose mode (**Both** recommended) → **Generate** → download the PNG.
+7. Choose mode (**Both** recommended) → **Generate** → download the PNG.
+
+If Colab still asks to restart: **Runtime → Disconnect and delete runtime**, reopen the notebook, and run from the top again.
 
 ## UI options
 
