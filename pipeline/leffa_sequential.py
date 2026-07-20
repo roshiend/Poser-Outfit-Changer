@@ -92,7 +92,6 @@ class PoseClothPipeline:
         if self._parsing is not None:
             return
 
-        from leffa_utils.densepose_predictor import DensePosePredictor
         from preprocess.humanparsing.run_parsing import Parsing
         from preprocess.openpose.run_openpose import OpenPose
 
@@ -104,10 +103,27 @@ class PoseClothPipeline:
         self._openpose = OpenPose(
             body_model_path=str(ckpt / "openpose" / "body_pose_model.pth"),
         )
-        self._densepose = DensePosePredictor(
-            config_path=str(ckpt / "densepose" / "densepose_rcnn_R_50_FPN_s1x.yaml"),
-            weights_path=str(ckpt / "densepose" / "model_final_162be9.pkl"),
-        )
+        self._densepose = self._make_densepose()
+
+    def _make_densepose(self):
+        """Prefer real DensePose; fall back if detectron2 _C is missing (common on Colab)."""
+        ckpt = self.ckpt_dir
+        try:
+            import detectron2  # noqa: F401
+            from detectron2 import _C  # noqa: F401
+            from leffa_utils.densepose_predictor import DensePosePredictor
+
+            pred = DensePosePredictor(
+                config_path=str(ckpt / "densepose" / "densepose_rcnn_R_50_FPN_s1x.yaml"),
+                weights_path=str(ckpt / "densepose" / "model_final_162be9.pkl"),
+            )
+            print("[densepose] Using Detectron2 DensePose")
+            return pred
+        except Exception as exc:
+            print(f"[densepose] Detectron2 unavailable ({exc!r}); using fallback")
+            from .densepose_fallback import FallbackDensePosePredictor
+
+            return FallbackDensePosePredictor(parsing_fn=self._parsing)
 
     def _unload_diffusion(self) -> None:
         self._vt_inference = None
