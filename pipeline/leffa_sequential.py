@@ -14,6 +14,12 @@ from typing import Literal, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 
+from .body_lock import (
+    align_pose_donor_to_base_body,
+    match_result_body_to_base,
+    person_bbox_from_parse,
+    soft_preserve_torso,
+)
 from .face_lock import lock_face_identity
 from .garment_extract import extract_garment_from_person
 from .memory import free_vram
@@ -53,12 +59,14 @@ class PoseClothPipeline:
         dtype: str = "float16",
         enable_face_lock: bool = True,
         default_ref_kind: RefKind = "clothed_person",
+        preserve_body: bool = True,
     ) -> None:
         self.leffa_root = Path(leffa_root)
         self.ckpt_dir = Path(ckpt_dir) if ckpt_dir else self.leffa_root / "ckpts"
         self.dtype = dtype
         self.enable_face_lock = enable_face_lock
         self.default_ref_kind = default_ref_kind
+        self.preserve_body = preserve_body
 
         _ensure_leffa_on_path(self.leffa_root)
 
@@ -268,36 +276,49 @@ class PoseClothPipeline:
         ref_acceleration: bool = True,
         face_lock: Optional[bool] = None,
         ref_kind: Optional[RefKind] = None,
+        preserve_body: Optional[bool] = None,
         return_debug: bool = False,
     ) -> Image.Image | Tuple[Image.Image, dict]:
         """
-        Run outfit and/or pose transfer.
+        Run outfit and/or pose transfer with face + body consistency.
 
         Default ref_kind='clothed_person': the pose/outfit image is a person
         wearing clothes. Clothing is parsed out for VTON; the full person
         image is still used for pose transfer.
 
-        Leffa pose-transfer convention
-        ------------------------------
-        src = target pose image
-        ref = appearance (identity / clothes) image
+        Body consistency (default on): scale-align the pose donor to the base
+        body, lightly preserve torso build after posing, then re-match overall
+        body size to the base person — plus face identity lock.
         """
+        from leffa_utils.utils import resize_and_center
+
         base = _as_pil(base_image)
         ref = _as_pil(ref_image)
         kind = ref_kind or self.default_ref_kind
         do_face = self.enable_face_lock if face_lock is None else face_lock
+        do_body = self.preserve_body if preserve_body is None else preserve_body
         debug: dict = {}
 
+        base = resize_and_center(base, 768, 1024)
+        ref = resize_and_center(ref, 768, 1024)
+
         current = base
+        base_bbox = None
+        if do_body:
+            self._load_preprocessors()
+            base_parse, _ = self._parsing(base.resize((384, 512)))
+            base_bbox = person_bbox_from_parse(
+                base_parse.resize((768, 1024), Image.NEAREST)
+            )
 
         if mode in ("both", "outfit_only"):
-            print("Step 1/2: Outfit transfer (VTON) — clothes from ref onto base...")
+            print("Step 1/2: Outfit transfer (VTON) — clothes onto base body...")
             if kind == "clothed_person":
                 vton_ref = self._garment_ref_from_clothed_person(ref, garment_type)
                 debug["garment_ref"] = vton_ref.copy()
             else:
                 vton_ref = ref
-            # Person = base; garment ref = extracted clothes (or flat garment)
+            # VTON keeps the base person's pose and body proportions.
             current = self._run_control(
                 src_image=current,
                 ref_image=vton_ref,
@@ -311,12 +332,29 @@ class PoseClothPipeline:
             )
             debug["after_vton"] = current.copy()
             self._unload_diffusion()
+
+        dressed_before_pose = current.copy()
+
         if mode in ("both", "pose_only"):
-            print("Step 2/2: Pose transfer — appearance from dressed base, pose from ref...")
-            # Appearance = current (base or dressed), pose = ref
+            print("Step 2/2: Pose transfer — keep base body build, take pose from ref...")
             appearance = current if mode == "both" else base
+            pose_src = ref
+            if do_body:
+                self._load_preprocessors()
+                donor_parse, _ = self._parsing(ref.resize((384, 512)))
+                donor_bbox = person_bbox_from_parse(
+                    donor_parse.resize((768, 1024), Image.NEAREST)
+                )
+                pose_src = align_pose_donor_to_base_body(
+                    pose_donor=ref,
+                    base_person=appearance,
+                    donor_bbox=donor_bbox,
+                    base_bbox=base_bbox,
+                )
+                debug["aligned_pose_donor"] = pose_src.copy()
+
             current = self._run_control(
-                src_image=ref,
+                src_image=pose_src,
                 ref_image=appearance,
                 control_type="pose_transfer",
                 step=steps,
@@ -327,23 +365,28 @@ class PoseClothPipeline:
             debug["after_pose"] = current.copy()
             self._unload_diffusion()
 
-        if do_face and mode != "outfit_only":
-            # After pose warp, re-apply base face. For outfit-only, Leffa usually
-            # already keeps the face; still allow explicit lock if requested.
+            if do_body:
+                print("Body proportion lock...")
+                current = soft_preserve_torso(
+                    posed=current,
+                    dressed_base=dressed_before_pose,
+                    strength=0.20,
+                )
+                current = match_result_body_to_base(
+                    result=current,
+                    base_person=base,
+                    base_bbox=base_bbox,
+                )
+                debug["after_body_lock"] = current.copy()
+
+        if do_face:
             print("Face identity lock...")
+            blend = 0.75 if mode == "outfit_only" else 0.92
             current = lock_face_identity(
                 base_image=base,
                 generated_image=current,
                 face_app=self._get_face_app(),
-            )
-            debug["after_face_lock"] = current.copy()
-        elif do_face and mode == "outfit_only":
-            print("Face identity lock (outfit mode)...")
-            current = lock_face_identity(
-                base_image=base,
-                generated_image=current,
-                face_app=self._get_face_app(),
-                blend=0.75,
+                blend=blend,
             )
             debug["after_face_lock"] = current.copy()
 
