@@ -12,7 +12,24 @@ def free_vram() -> None:
         import torch
 
         if torch.cuda.is_available():
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def cuda_mem_report(tag: str = "") -> None:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        alloc = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"[vram{(' ' + tag) if tag else ''}] allocated={alloc:.2f}GB reserved={reserved:.2f}GB")
     except Exception:
         pass

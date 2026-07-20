@@ -86,9 +86,9 @@ def lock_face_identity(
 
             face_app = FaceAnalysis(
                 name="buffalo_l",
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                providers=["CPUExecutionProvider"],
             )
-            face_app.prepare(ctx_id=0, det_size=(640, 640))
+            face_app.prepare(ctx_id=-1, det_size=(640, 640))
         except Exception as exc:
             print(f"[face_lock] InsightFace unavailable ({exc}); skipping face lock.")
             return (

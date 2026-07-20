@@ -22,7 +22,7 @@ from .body_lock import (
 )
 from .face_lock import lock_face_identity
 from .garment_extract import extract_garment_from_person
-from .memory import free_vram
+from .memory import cuda_mem_report, free_vram
 
 PathLike = Union[str, Path, Image.Image]
 Mode = Literal["both", "outfit_only", "pose_only"]
@@ -106,10 +106,29 @@ class PoseClothPipeline:
         self._densepose = self._make_densepose()
 
     def _make_densepose(self):
-        """Prefer real DensePose; fall back if detectron2/av are missing (common on Colab)."""
+        """
+        Prefer lightweight fallback on Colab T4 to avoid OOM when VTON loads.
+
+        Detectron2 DensePose + diffusion often exceeds ~15GB. Set
+        LEFFA_REAL_DENSEPOSE=1 to force the real predictor.
+        """
+        import os
+
         ckpt = self.ckpt_dir
+        in_colab = Path("/content").exists()
+        force_real = os.environ.get("LEFFA_REAL_DENSEPOSE", "").strip() == "1"
+
+        if in_colab and not force_real:
+            print(
+                "[densepose] Colab T4 mode: using fallback DensePose to avoid kernel OOM. "
+                "Set LEFFA_REAL_DENSEPOSE=1 only if you have spare VRAM."
+            )
+            from .densepose_fallback import FallbackDensePosePredictor
+
+            return FallbackDensePosePredictor(parsing_fn=self._parsing)
+
         try:
-            import av  # noqa: F401  # required by Leffa densepose data stack
+            import av  # noqa: F401
             import detectron2  # noqa: F401
             from detectron2 import _C  # noqa: F401
             from leffa_utils.densepose_predictor import DensePosePredictor
@@ -126,11 +145,21 @@ class PoseClothPipeline:
 
             return FallbackDensePosePredictor(parsing_fn=self._parsing)
 
+    def _unload_preprocessors(self) -> None:
+        """Drop DensePose/parsing/openpose before loading diffusion models."""
+        self._densepose = None
+        self._parsing = None
+        self._openpose = None
+        free_vram()
+        print("[mem] Unloaded preprocessors (DensePose/parsing/openpose)")
+        cuda_mem_report("after preprocess unload")
+
     def _unload_diffusion(self) -> None:
         self._vt_inference = None
         self._pt_inference = None
         self._active_model = None
         free_vram()
+        cuda_mem_report("after diffusion unload")
 
     def _load_vton(self, model_type: str = "viton_hd") -> None:
         if self._active_model == f"vton_{model_type}" and self._vt_inference is not None:
@@ -183,9 +212,9 @@ class PoseClothPipeline:
 
             app = FaceAnalysis(
                 name="buffalo_l",
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                providers=["CPUExecutionProvider"],
             )
-            app.prepare(ctx_id=0, det_size=(640, 640))
+            app.prepare(ctx_id=-1, det_size=(640, 640))
             self._face_app = app
         except Exception as exc:
             print(f"[face_lock] Could not init InsightFace: {exc}")
@@ -254,12 +283,17 @@ class PoseClothPipeline:
                 iuv = self._densepose.predict_iuv(src_array)
                 seg = np.concatenate([iuv[:, :, 0:1]] * 3, axis=-1)
             densepose = Image.fromarray(seg)
+            # Critical on Colab: free DensePose VRAM before loading VTON
+            self._unload_preprocessors()
+            free_vram()
             self._load_vton(vt_model_type)
             inference = self._vt_inference
         else:
             mask = Image.fromarray(np.ones_like(src_array) * 255)
             iuv = self._densepose.predict_iuv(src_array)[:, :, ::-1]
             densepose = Image.fromarray(iuv)
+            self._unload_preprocessors()
+            free_vram()
             self._load_pose()
             inference = self._pt_inference
 
