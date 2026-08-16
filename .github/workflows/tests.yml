@@ -19,18 +19,17 @@ jobs:
           cache: pip
       - name: Install lightweight test dependencies
         run: python -m pip install "numpy<2" pillow opencv-python-headless
-      - name: Compile changed modules
+      - name: Synchronize deployable Space pipeline
+        run: python push_to_hf_space.py --sync-only
+      - name: Verify Space pipeline has no drift
+        run: git diff --exit-code -- hf_space/pipeline
+      - name: Compile root and deployable modules
         run: >-
-          python -m py_compile
-          pipeline/body_lock.py
-          pipeline/face_lock.py
-          pipeline/garment_extract.py
-          pipeline/pose_geometry.py
-          pipeline/benchmark_metrics.py
-          pipeline/fidelity_v2.py
-          pipeline/leffa_sequential.py
-          benchmark_fidelity.py
+          python -m compileall -q
+          pipeline
+          hf_space/pipeline
           hf_space/app.py
+          benchmark_fidelity.py
           push_to_hf_space.py
       - name: Run fidelity policy tests
         run: python -m unittest discover -s tests -v
