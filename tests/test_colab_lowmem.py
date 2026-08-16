@@ -1,9 +1,12 @@
+import gc
 import os
 import unittest
+import weakref
 
 from colab_runner import configure_colab_environment
 from pipeline import ColabAwareFidelityPipeline, PoseClothPipeline
 from pipeline.colab_lowmem import choose_colab_policy
+from pipeline.colab_pipeline import _drop_failed_load_objects
 
 
 class ColabLowMemoryPolicyTests(unittest.TestCase):
@@ -37,6 +40,23 @@ class ColabLowMemoryPolicyTests(unittest.TestCase):
             resolution_mode="safe",
         )
         self.assertEqual((policy.transform_width, policy.transform_height), (576, 768))
+
+    def test_failed_meta_load_objects_become_collectible_before_fallback(self):
+        class HeavyObject:
+            pass
+
+        model = HeavyObject()
+        state = HeavyObject()
+        model_ref = weakref.ref(model)
+        state_ref = weakref.ref(state)
+
+        model, state = _drop_failed_load_objects(model, state)
+        gc.collect()
+
+        self.assertIsNone(model)
+        self.assertIsNone(state)
+        self.assertIsNone(model_ref())
+        self.assertIsNone(state_ref())
 
     def test_colab_runner_sets_memory_flags(self):
         old = {name: os.environ.get(name) for name in (
