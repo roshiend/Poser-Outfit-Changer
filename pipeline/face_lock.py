@@ -108,10 +108,16 @@ def _adaptive_face_blend(src_face, dst_face, requested: float) -> float:
 
 
 def _identity_adjusted_blend(current: float, similarity: float | None) -> float:
-    """Use embedding similarity to avoid both under-correction and over-pasting."""
+    """Use identity similarity without undoing pose-based face safety limits."""
     current = float(np.clip(current, 0.0, 1.0))
     if similarity is None or current <= 0.01:
         return current
+
+    # A low score must never override a blend that was reduced because the head
+    # is turned/profile. Only frontal-compatible blends can be strengthened.
+    if current < 0.70:
+        return current
+
     if similarity < 0.20:
         return min(0.88, current + 0.14)
     if similarity < 0.35:
