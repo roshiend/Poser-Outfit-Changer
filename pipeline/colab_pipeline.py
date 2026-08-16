@@ -73,6 +73,12 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
 
         print(f"[colab-lowmem] Memory-mapped model load: {weight_path}")
 
+        # Define these outside the preferred-load try so a failed attempt can
+        # explicitly drop every large reference before constructing the fallback.
+        # Without this, a partially assigned SDXL model can remain live in the
+        # local frame and double the fallback's system-RAM peak.
+        model = None
+        state = None
         try:
             from accelerate import init_empty_weights
 
@@ -89,7 +95,7 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
                 weights_only=True,
             )
             model.load_state_dict(state, strict=True, assign=True)
-            del state
+            state = None
             model.eval()
             gc.collect()
             free_vram()
@@ -97,7 +103,10 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
             return model
         except Exception as exc:
             print(f"[colab-lowmem] Meta + mmap load unavailable; using half-init fallback: {exc!r}")
+            state = None
+            model = None
             gc.collect()
+            free_vram()
 
         original_load = torch.load
         original_dtype = torch.get_default_dtype()
