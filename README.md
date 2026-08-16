@@ -79,7 +79,7 @@ Even at `1.0`, safety checks and per-segment ratio clamps remain active. If the 
 The benchmark reports three complementary measurements:
 
 - **Pose angle error (degrees)** — median difference in major arm/leg articulation angles against the reference pose. Lower is better.
-- **Body proportion error** — median multiplicative mismatch between normalized generated and base-person body segments. Lower is better.
+- **Body proportion error** — RMS multiplicative mismatch between normalized generated and base-person body segments, so a locally stretched limb is not hidden by unchanged segments. Lower is better.
 - **Identity similarity** — InsightFace cosine similarity between the base and final generated face. Higher is better.
 
 It also produces a bounded composite score for convenient ranking. The composite score is a tuning aid rather than a scientific identity/quality guarantee; always inspect the saved comparison sheet as well.
