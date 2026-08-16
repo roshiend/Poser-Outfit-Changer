@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 — 2026-08-16
+
+### Google Colab Detectron2 bootstrap fix
+
+- Fix the Colab DensePose bootstrap so it no longer runs `pip install -e` against Leffa's copied `3rdparty/detectron2` package tree, which is not an installable Python project.
+- Build `detectron2._C` in place from Leffa's exact Detectron2 0.6 C++/CUDA source tree, keeping the compiled extension aligned with the Python package used by DensePose.
+- Avoid using Leffa's separate human-parsing Detectron2 0.1.3 source as a substitute for the DensePose 0.6 runtime.
+- Build only for the GPU architecture Colab actually assigns (`TORCH_CUDA_ARCH_LIST`) and default to one compiler job to reduce setup-time RAM pressure on ~13 GB free runtimes.
+- Use lower compiler optimization during the one-time extension build to reduce peak compilation memory without changing generation-time model quality.
+- Show full compiler output instead of suppressing it with pip `-q`, and include Python/Torch/build-job information in the Colab runtime summary.
+- Add regression coverage ensuring the generated builder targets `detectron2._C` from the 0.6 package tree.
+
 ## 1.0.1 — 2026-08-16
 
 ### Google Colab low-memory runtime

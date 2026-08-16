@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -25,12 +26,19 @@ def configure_colab_environment(resolution: str = "auto") -> None:
     os.environ["LEFFA_COLAB_LOW_MEMORY"] = "1"
     os.environ["LEFFA_COLAB_RESOLUTION"] = resolution
     os.environ["LEFFA_ALLOW_POSE"] = "1"
-    os.environ.setdefault("MAX_JOBS", "2")
+    # Detectron2 C++/CUDA compilation is the largest setup-time RAM spike on
+    # free Colab. One compile job is slower but far safer on ~13 GB runtimes.
+    os.environ.setdefault("MAX_JOBS", "1")
 
 
-def _run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
+def _run(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | Path | None = None,
+) -> None:
     print("+", " ".join(cmd), flush=True)
-    subprocess.check_call(cmd, env=env)
+    subprocess.check_call(cmd, env=env, cwd=None if cwd is None else str(cwd))
 
 
 def _ensure_vendor_links(leffa_root: Path) -> None:
@@ -44,8 +52,16 @@ def _ensure_vendor_links(leffa_root: Path) -> None:
                 shutil.copytree(target, link)
 
 
+def _clear_detectron2_modules() -> None:
+    for name in list(sys.modules):
+        if name == "detectron2" or name.startswith("detectron2."):
+            sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+
+
 def _detectron2_ready() -> bool:
     try:
+        _clear_detectron2_modules()
         import detectron2  # noqa: F401
         from detectron2 import _C  # noqa: F401
 
@@ -54,39 +70,138 @@ def _detectron2_ready() -> bool:
         return False
 
 
+def _detectron2_extension_setup_text() -> str:
+    """Return a minimal setup.py that builds Leffa's exact Detectron2 0.6 _C.
+
+    Leffa's ``3rdparty/detectron2`` directory is only the Python package tree,
+    not an installable project. Building in-place from that exact tree keeps
+    the compiled extension aligned with the 0.6 Python code DensePose imports.
+    """
+    return textwrap.dedent(
+        r"""
+        import os
+        from pathlib import Path
+
+        import torch
+        from setuptools import setup
+        from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+
+        root = Path(__file__).resolve().parent
+        package = root / "detectron2"
+        csrc = package / "layers" / "csrc"
+        main_source = csrc / "vision.cpp"
+
+        if not main_source.exists():
+            raise RuntimeError(f"Detectron2 C++ source missing: {main_source}")
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA GPU is required to build Leffa DensePose support.")
+        if CUDA_HOME is None:
+            raise RuntimeError(
+                "CUDA toolkit/nvcc was not found. Colab must provide a CUDA development runtime."
+            )
+
+        cpp_sources = [
+            str(path)
+            for path in csrc.rglob("*.cpp")
+            if path.resolve() != main_source.resolve()
+        ]
+        cuda_sources = [str(path) for path in csrc.rglob("*.cu")]
+        sources = [str(main_source)] + cpp_sources + cuda_sources
+
+        extension = CUDAExtension(
+            "detectron2._C",
+            sources,
+            include_dirs=[str(csrc)],
+            define_macros=[("WITH_CUDA", None)],
+            extra_compile_args={
+                "cxx": ["-O1"],
+                "nvcc": [
+                    "-O1",
+                    "-DCUDA_HAS_FP16=1",
+                    "-D__CUDA_NO_HALF_OPERATORS__",
+                    "-D__CUDA_NO_HALF_CONVERSIONS__",
+                    "-D__CUDA_NO_HALF2_OPERATORS__",
+                ],
+            },
+        )
+
+        setup(
+            name="leffa-detectron2-colab-extension",
+            version="0.6.0",
+            ext_modules=[extension],
+            cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
+        )
+        """
+    ).lstrip()
+
+
+def _prepare_detectron2_build_env() -> dict[str, str]:
+    import torch
+
+    env = dict(os.environ)
+    env.setdefault("MAX_JOBS", "1")
+    if torch.cuda.is_available():
+        major, minor = torch.cuda.get_device_capability(0)
+        # Build only for the GPU Colab actually assigned (e.g. T4 = 7.5).
+        env.setdefault("TORCH_CUDA_ARCH_LIST", f"{major}.{minor}")
+    return env
+
+
 def ensure_real_densepose(leffa_root: Path) -> None:
-    """Build Leffa's vendored Detectron2 with a low-RAM compile job count."""
+    """Build Leffa's exact Detectron2 0.6 extension with low-RAM settings."""
     if _detectron2_ready():
         print("Real Detectron2 DensePose runtime already available.")
         return
 
     source = leffa_root / "3rdparty" / "detectron2"
-    if not source.exists():
-        raise RuntimeError(f"Detectron2 source missing: {source}")
+    csrc = source / "layers" / "csrc"
+    if not source.exists() or not (csrc / "vision.cpp").exists():
+        raise RuntimeError(f"Leffa Detectron2 0.6 source is incomplete: {source}")
 
-    env = dict(os.environ)
-    env.setdefault("MAX_JOBS", "2")
-    _run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            "--no-build-isolation",
-            "-e",
-            str(source),
-        ],
-        env=env,
+    # The copied 0.6 package intentionally has no setup.py. Do not `pip -e`
+    # this directory: compile detectron2._C directly into the package instead.
+    parent = source.parent
+    setup_path = parent / "_colab_detectron2_setup.py"
+    build_dir = parent / "build"
+
+    # Remove an incompatible/stale binary from a previous runtime attempt.
+    for stale in source.glob("_C*.so"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    shutil.rmtree(build_dir, ignore_errors=True)
+
+    setup_path.write_text(_detectron2_extension_setup_text(), encoding="utf-8")
+    env = _prepare_detectron2_build_env()
+    print(
+        "Building Leffa Detectron2 0.6 in place "
+        f"(MAX_JOBS={env.get('MAX_JOBS')}, "
+        f"TORCH_CUDA_ARCH_LIST={env.get('TORCH_CUDA_ARCH_LIST', 'auto')})"
     )
+    try:
+        _run(
+            [
+                sys.executable,
+                setup_path.name,
+                "build_ext",
+                "--inplace",
+                "--force",
+            ],
+            env=env,
+            cwd=parent,
+        )
+    finally:
+        try:
+            setup_path.unlink()
+        except OSError:
+            pass
+        shutil.rmtree(build_dir, ignore_errors=True)
 
-    for name in list(sys.modules):
-        if name == "detectron2" or name.startswith("detectron2."):
-            sys.modules.pop(name, None)
-    importlib.invalidate_caches()
+    _clear_detectron2_modules()
     if not _detectron2_ready():
         raise RuntimeError(
-            "Detectron2 finished installing but detectron2._C is not importable. "
+            "Detectron2 _C finished building but is not importable. "
             "Restart the Colab runtime and rerun the setup cells."
         )
     print("Real Detectron2 DensePose: READY")
@@ -99,10 +214,13 @@ def runtime_summary() -> dict[str, Any]:
     if not torch.cuda.is_available():
         raise RuntimeError("No CUDA GPU detected. Choose Runtime → Change runtime type → GPU.")
     info = {
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(0),
         "vram_gb": float(torch.cuda.get_device_properties(0).total_memory) / 1024**3,
         "system_ram_gb": float(psutil.virtual_memory().total) / 1024**3,
         "resolution_policy": os.environ.get("LEFFA_COLAB_RESOLUTION", "auto"),
+        "detectron2_build_jobs": os.environ.get("MAX_JOBS", "1"),
     }
     print(json.dumps(info, indent=2))
     return info

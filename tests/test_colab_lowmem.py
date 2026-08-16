@@ -3,7 +3,10 @@ import os
 import unittest
 import weakref
 
-from colab_runner import configure_colab_environment
+from colab_runner import (
+    _detectron2_extension_setup_text,
+    configure_colab_environment,
+)
 from pipeline import ColabAwareFidelityPipeline, PoseClothPipeline
 from pipeline.colab_lowmem import choose_colab_policy
 from pipeline.colab_pipeline import _drop_failed_load_objects
@@ -58,18 +61,30 @@ class ColabLowMemoryPolicyTests(unittest.TestCase):
         self.assertIsNone(model_ref())
         self.assertIsNone(state_ref())
 
+    def test_detectron2_builder_targets_leffa_06_package_in_place(self):
+        setup_text = _detectron2_extension_setup_text()
+        self.assertIn('package = root / "detectron2"', setup_text)
+        self.assertIn('"detectron2._C"', setup_text)
+        self.assertIn("CUDAExtension", setup_text)
+        self.assertIn('version="0.6.0"', setup_text)
+        self.assertNotIn("pip install", setup_text)
+        self.assertNotIn("mhp_extension", setup_text)
+
     def test_colab_runner_sets_memory_flags(self):
-        old = {name: os.environ.get(name) for name in (
+        names = (
             "LEFFA_COLAB_LOW_MEMORY",
             "LEFFA_COLAB_RESOLUTION",
             "LEFFA_ALLOW_POSE",
             "MAX_JOBS",
-        )}
+        )
+        old = {name: os.environ.get(name) for name in names}
         try:
+            os.environ.pop("MAX_JOBS", None)
             configure_colab_environment("balanced")
             self.assertEqual(os.environ["LEFFA_COLAB_LOW_MEMORY"], "1")
             self.assertEqual(os.environ["LEFFA_COLAB_RESOLUTION"], "balanced")
             self.assertEqual(os.environ["LEFFA_ALLOW_POSE"], "1")
+            self.assertEqual(os.environ["MAX_JOBS"], "1")
         finally:
             for name, value in old.items():
                 if value is None:
