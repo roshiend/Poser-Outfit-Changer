@@ -63,4 +63,5 @@ jobs:
 
       - name: Deployment target
         if: steps.auth.outputs.ready == 'true'
-        run: echo "Published target: https://huggingface.co/spaces/$HF_SPACE_ID"
+        run: |
+          echo "Published target: https://huggingface.co/spaces/$HF_SPACE_ID"
