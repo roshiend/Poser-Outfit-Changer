@@ -1,5 +1,6 @@
-# Hugging Face Spaces runtime deps (keep lean; no detectron2 compile)
-gradio>=4.44,<6
+# Hugging Face Spaces runtime deps.
+# Leffa's vendored Detectron2 is compiled on demand when a pose mode is first requested.
+gradio==5.49.1
 spaces
 huggingface_hub
 accelerate
@@ -13,7 +14,7 @@ omegaconf
 opencv-python-headless
 peft
 pycocotools
-regex
+regex==2024.5.15
 safetensors
 scikit-image
 scipy
