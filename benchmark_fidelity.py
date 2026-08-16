@@ -214,6 +214,12 @@ def run(args: argparse.Namespace) -> int:
         base_points, base_valid = _measure_openpose(pipe, base)
         target_points, target_valid = _measure_openpose(pipe, reference)
 
+        # If the target/reference visibly contains a detectable face, generated
+        # face-detection failure is an identity failure, not a reason to drop the
+        # identity term. For genuinely back-facing targets, identity is excluded.
+        face_app = pipe._get_face_app()
+        reference_face_visible = face_identity_similarity(base, reference, face_app) is not None
+
         variants: list[tuple[str, Image.Image, dict]] = []
         for strength in args.strengths:
             label = f"{strength:.2f}".rstrip("0").rstrip(".")
@@ -239,14 +245,20 @@ def run(args: argparse.Namespace) -> int:
             result.save(result_path)
             generated_points, generated_valid = _measure_openpose(pipe, result)
 
-            identity = face_identity_similarity(base, result, pipe._get_face_app())
+            identity = face_identity_similarity(base, result, face_app)
+            identity_for_score = identity
+            if reference_face_visible and identity is None:
+                identity_for_score = 0.0
+            elif not reference_face_visible:
+                identity_for_score = None
+
             pose_error = pose_angle_error_deg(
                 generated_points, generated_valid, target_points, target_valid
             )
             proportion_error = body_proportion_error(
                 generated_points, generated_valid, base_points, base_valid
             )
-            score = composite_fidelity_score(identity, pose_error, proportion_error)
+            score = composite_fidelity_score(identity_for_score, pose_error, proportion_error)
             retarget = debug.get("pose_retarget_diagnostics") or {}
 
             row = {
@@ -254,6 +266,7 @@ def run(args: argparse.Namespace) -> int:
                 "strength": float(strength),
                 "mode": mode,
                 "garment_type": str(case.get("garment_type", "dresses")),
+                "identity_metric_required": bool(reference_face_visible),
                 "identity_similarity": _safe_float(identity),
                 "pose_angle_error_deg": _safe_float(pose_error),
                 "body_proportion_error": _safe_float(proportion_error),
@@ -279,9 +292,10 @@ def run(args: argparse.Namespace) -> int:
         _contact_sheet(base, reference, variants, case_dir / "comparison.png")
 
     fields = [
-        "case", "strength", "mode", "garment_type", "identity_similarity",
-        "pose_angle_error_deg", "body_proportion_error", "composite_score",
-        "retarget_applied", "retarget_reason", "retarget_proportion_gap", "result",
+        "case", "strength", "mode", "garment_type", "identity_metric_required",
+        "identity_similarity", "pose_angle_error_deg", "body_proportion_error",
+        "composite_score", "retarget_applied", "retarget_reason",
+        "retarget_proportion_gap", "result",
     ]
     with (output_root / "metrics.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
