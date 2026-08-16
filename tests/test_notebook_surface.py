@@ -49,6 +49,18 @@ class NotebookSurfaceTests(unittest.TestCase):
         self.assertIn("numpy.dtype size changed", self.code_text)
         self.assertIn("clean subprocess ABI", self.code_text)
 
+    def test_notebook_has_secure_hugging_face_token_step(self):
+        self.assertIn("from getpass import getpass", self.code_text)
+        self.assertIn("userdata.get('HF_TOKEN')", self.code_text)
+        self.assertIn("os.environ['HF_TOKEN'] = HF_TOKEN", self.code_text)
+        self.assertIn("os.environ['HUGGING_FACE_HUB_TOKEN'] = HF_TOKEN", self.code_text)
+        self.assertIn("login(token=HF_TOKEN, add_to_git_credential=False)", self.code_text)
+        self.assertIn("HfApi().whoami(token=HF_TOKEN)", self.code_text)
+        self.assertNotIn("print(HF_TOKEN", self.code_text)
+        token_position = self.code_text.index("HfApi().whoami(token=HF_TOKEN)")
+        prepare_position = self.code_text.index("colab_runner.prepare_colab")
+        self.assertLess(token_position, prepare_position)
+
     def test_notebook_has_no_gradio_web_server_code(self):
         code = self.code_text.lower()
         self.assertNotIn("import gradio", code)
