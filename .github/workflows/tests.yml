@@ -30,6 +30,7 @@ jobs:
           hf_space/pipeline
           hf_space/app.py
           benchmark_fidelity.py
+          colab_runner.py
           push_to_hf_space.py
       - name: Run fidelity policy tests
         run: python -m unittest discover -s tests -v
