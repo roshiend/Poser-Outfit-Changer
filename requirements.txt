@@ -19,7 +19,7 @@ cloudpathlib
 portalocker
 ninja
 matplotlib
-numpy>=1.26.4,<2
+numpy==1.26.4
 omegaconf
 onnx
 onnxruntime-gpu
