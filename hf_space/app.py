@@ -1,11 +1,8 @@
-"""
-Hugging Face Spaces entrypoint for Pose & Cloth Swap.
-
-Uses Leffa VTON (+ optional pose) with DensePose fallback (no detectron2 build).
-"""
+"""Hugging Face Spaces entrypoint for Poser Outfit Changer."""
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import subprocess
@@ -15,33 +12,29 @@ from pathlib import Path
 import gradio as gr
 from PIL import Image, ImageDraw
 
-# Spaces marker used by pipeline for memory-safe defaults
-os.environ.setdefault("SPACE_ID", os.environ.get("SPACE_ID", "local-space"))
-
 ROOT = Path(__file__).resolve().parent
 WORK = ROOT / "runtime"
 LEFFA_ROOT = WORK / "Leffa"
 CKPT_DIR = WORK / "ckpts"
-PIPE_DIR = ROOT / "pipeline"
 
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(LEFFA_ROOT))
 
 try:
-    import spaces  # HF ZeroGPU / Spaces GPU decorator
-except Exception:  # local / non-Spaces
+    import spaces
+except Exception:
     class _SpacesShim:
         @staticmethod
         def GPU(duration=120, size=None):
             def deco(fn):
                 return fn
-
             return deco
 
     spaces = _SpacesShim()
 
 _pipe = None
 _setup_done = False
+_densepose_runtime_ready = False
 
 
 def _run(cmd: list[str]) -> None:
@@ -49,29 +42,9 @@ def _run(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
 
 
-def setup_runtime() -> None:
-    """Clone Leffa + download checkpoints once per Space container."""
-    global _setup_done
-    if _setup_done:
-        return
-
-    WORK.mkdir(parents=True, exist_ok=True)
-    os.chdir(WORK)
-
-    if not LEFFA_ROOT.exists():
-        _run(
-            [
-                "git",
-                "clone",
-                "--depth",
-                "1",
-                "https://github.com/franciszzj/Leffa.git",
-                str(LEFFA_ROOT),
-            ]
-        )
-
-    # Prefer Leffa 3rdparty SCHP/densepose trees for imports
-    for name in ("SCHP", "densepose"):
+def _ensure_vendor_links() -> None:
+    """Restore Leffa's expected top-level links without deleting Detectron2."""
+    for name in ("SCHP", "densepose", "detectron2"):
         link = LEFFA_ROOT / name
         target = LEFFA_ROOT / "3rdparty" / name
         if target.exists() and not link.exists():
@@ -80,31 +53,82 @@ def setup_runtime() -> None:
             except OSError:
                 shutil.copytree(target, link)
 
-    # Remove vendored detectron2 symlink so we never require compiled _C
-    d2 = LEFFA_ROOT / "detectron2"
-    if d2.is_symlink() or d2.exists():
-        if d2.is_symlink() or d2.is_file():
-            d2.unlink()
-        elif d2.is_dir():
-            shutil.rmtree(d2, ignore_errors=True)
 
-    if str(LEFFA_ROOT) not in sys.path:
-        sys.path.insert(0, str(LEFFA_ROOT))
+def _detectron2_compiled() -> bool:
+    try:
+        import detectron2  # noqa: F401
+        from detectron2 import _C  # noqa: F401
+        return True
+    except Exception as exc:
+        print(f"[setup] Detectron2 extension unavailable: {exc!r}", flush=True)
+        return False
 
-    from pipeline import PoseClothPipeline
 
-    global _pipe
-    _pipe = PoseClothPipeline(
-        leffa_root=str(LEFFA_ROOT),
-        ckpt_dir=str(CKPT_DIR),
-        dtype="float16",
-        enable_face_lock=True,
-        default_ref_kind="clothed_person",
-        preserve_body=True,
-    )
-    _pipe.download_checkpoints()
-    _setup_done = True
-    print("Runtime ready", flush=True)
+def _ensure_real_densepose_runtime() -> None:
+    """Build Leffa's vendored Detectron2 only when a pose operation needs it."""
+    global _densepose_runtime_ready
+    if _densepose_runtime_ready and _detectron2_compiled():
+        return
+    if _detectron2_compiled():
+        _densepose_runtime_ready = True
+        return
+
+    source = LEFFA_ROOT / "3rdparty" / "detectron2"
+    if not source.exists():
+        raise RuntimeError(f"Leffa Detectron2 source is missing: {source}")
+
+    print("[setup] Building Detectron2 for accurate DensePose pose transfer...", flush=True)
+    _run([sys.executable, "-m", "pip", "install", "-e", str(source)])
+
+    for name in list(sys.modules):
+        if name == "detectron2" or name.startswith("detectron2."):
+            sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+
+    if not _detectron2_compiled():
+        raise RuntimeError(
+            "Detectron2 installed but its compiled _C extension still cannot be imported. "
+            "Pose transfer is stopped rather than using fake DensePose IUV."
+        )
+    _densepose_runtime_ready = True
+    print("[setup] Real DensePose runtime ready", flush=True)
+
+
+def setup_runtime(require_pose: bool = False) -> None:
+    """Clone Leffa/download weights once; prepare real DensePose when pose is requested."""
+    global _setup_done, _pipe
+
+    if not _setup_done:
+        WORK.mkdir(parents=True, exist_ok=True)
+        os.chdir(WORK)
+
+        if not LEFFA_ROOT.exists():
+            _run([
+                "git", "clone", "--depth", "1",
+                "https://github.com/franciszzj/Leffa.git",
+                str(LEFFA_ROOT),
+            ])
+
+        _ensure_vendor_links()
+        if str(LEFFA_ROOT) not in sys.path:
+            sys.path.insert(0, str(LEFFA_ROOT))
+
+        from pipeline import PoseClothPipeline
+
+        _pipe = PoseClothPipeline(
+            leffa_root=str(LEFFA_ROOT),
+            ckpt_dir=str(CKPT_DIR),
+            dtype="float16",
+            enable_face_lock=True,
+            default_ref_kind="clothed_person",
+            preserve_body=True,
+        )
+        _pipe.download_checkpoints()
+        _setup_done = True
+        print("Runtime ready", flush=True)
+
+    if require_pose:
+        _ensure_real_densepose_runtime()
 
 
 def _side_by_side(base: Image.Image, ref: Image.Image, result: Image.Image) -> Image.Image:
@@ -119,7 +143,26 @@ def _side_by_side(base: Image.Image, ref: Image.Image, result: Image.Image) -> I
     return canvas
 
 
-@spaces.GPU(duration=180)
+def _debug_gallery(debug: dict):
+    preferred = [
+        ("garment_ref", "Extracted garment"),
+        ("outfit_mask", "VTON mask"),
+        ("outfit_densepose", "VTON DensePose"),
+        ("after_vton", "After outfit"),
+        ("aligned_pose_donor", "Body-aligned pose donor"),
+        ("pose_densepose", "Real pose DensePose IUV"),
+        ("after_pose", "After pose"),
+        ("after_face_lock", "Final identity lock"),
+    ]
+    items = []
+    for key, label in preferred:
+        value = debug.get(key)
+        if isinstance(value, Image.Image):
+            items.append((value, label))
+    return items
+
+
+@spaces.GPU(duration=300)
 def run_swap(
     base,
     ref,
@@ -136,11 +179,8 @@ def run_swap(
     if base is None or ref is None:
         raise gr.Error("Upload both a Base image and a Pose & Outfit image.")
 
-    setup_runtime()
-    assert _pipe is not None
-
     mode_map = {
-        "Outfit only (recommended)": "outfit_only",
+        "Outfit only": "outfit_only",
         "Both (outfit + pose)": "both",
         "Pose only": "pose_only",
     }
@@ -150,31 +190,50 @@ def run_swap(
         "Dress / full outfit": "dresses",
     }
     ref_kind_map = {
-        "Clothed person (default)": "clothed_person",
+        "Clothed person": "clothed_person",
         "Flat garment photo": "flat_garment",
     }
 
-    progress(0.05, desc="Running swap...")
-    result = _pipe.generate(
-        base_image=base,
-        ref_image=ref,
-        mode=mode_map[mode],
-        garment_type=garment_map[garment_type],
-        steps=int(steps),
-        guidance_scale=float(guidance),
-        seed=int(seed),
-        ref_acceleration=True,
-        face_lock=bool(face_lock),
-        ref_kind=ref_kind_map[ref_kind],
-        preserve_body=bool(preserve_body),
-    )
+    internal_mode = mode_map[mode]
+    require_pose = internal_mode in {"both", "pose_only"}
+    progress(0.03, desc="Preparing runtime...")
+
+    try:
+        setup_runtime(require_pose=require_pose)
+        assert _pipe is not None
+
+        progress(0.08, desc="Running transfer...")
+        result, debug = _pipe.generate(
+            base_image=base,
+            ref_image=ref,
+            mode=internal_mode,
+            garment_type=garment_map[garment_type],
+            vt_model_type="auto",
+            steps=int(steps),
+            guidance_scale=float(guidance),
+            seed=int(seed),
+            ref_acceleration=True,
+            face_lock=bool(face_lock),
+            ref_kind=ref_kind_map[ref_kind],
+            preserve_body=bool(preserve_body),
+            return_debug=True,
+        )
+    except Exception as exc:
+        raise gr.Error(str(exc)) from exc
+
     compare = _side_by_side(base, ref, result)
     out = WORK / "outputs"
     out.mkdir(exist_ok=True)
     result_path = out / "result.png"
     result.save(result_path)
+
+    selected = debug.get("selected_vton_model", "n/a")
+    status = (
+        f"**Completed:** `{internal_mode}`  •  VTON model: `{selected}`  •  "
+        f"Pose DensePose: `{'real/required' if require_pose else 'not required'}`"
+    )
     progress(1.0, desc="Done")
-    return result, compare, str(result_path)
+    return result, compare, str(result_path), _debug_gallery(debug), status
 
 
 def build_ui() -> gr.Blocks:
@@ -182,47 +241,56 @@ def build_ui() -> gr.Blocks:
         gr.Markdown(
             """
             # Poser Outfit Changer
-            Keep the **base** person's face and body. Copy clothes (and optionally pose) from another clothed person.
+            Keep the **base person's identity/body appearance** and copy clothes and/or pose from a reference person.
 
-            **Shared GPU tip:** start with **Outfit only**. Full pose uses SDXL and may fail on small free GPUs.
+            **Accuracy policy:** pose transfer runs only with real Detectron2 DensePose. The app no longer silently
+            changes **Both** into outfit-only, and it no longer stretches the finished person after pose generation.
             """
         )
         with gr.Row():
-            base_in = gr.Image(label="Base image (face + body to keep)", type="pil", height=360)
-            ref_in = gr.Image(
-                label="Pose & Outfit image (person wearing clothes)", type="pil", height=360
-            )
+            base_in = gr.Image(label="Base image — identity/body to keep", type="pil", height=360)
+            ref_in = gr.Image(label="Reference — pose/outfit to copy", type="pil", height=360)
+
         with gr.Row():
             mode = gr.Radio(
-                [
-                    "Outfit only (recommended)",
-                    "Both (outfit + pose)",
-                    "Pose only",
-                ],
-                value="Outfit only (recommended)",
+                ["Both (outfit + pose)", "Outfit only", "Pose only"],
+                value="Both (outfit + pose)",
                 label="Mode",
             )
             garment = gr.Radio(
                 ["Upper body", "Lower body", "Dress / full outfit"],
                 value="Dress / full outfit",
-                label="Which clothes to copy",
+                label="Clothes to copy",
             )
             ref_kind = gr.Radio(
-                ["Clothed person (default)", "Flat garment photo"],
-                value="Clothed person (default)",
-                label="Reference image type",
+                ["Clothed person", "Flat garment photo"],
+                value="Clothed person",
+                label="Reference type",
             )
+
         with gr.Accordion("Advanced", open=False):
-            steps = gr.Slider(15, 40, value=20, step=1, label="Inference steps")
+            gr.Markdown(
+                "VTON model is selected automatically: VITON-HD for upper-body, "
+                "DressCode for lower/full outfit."
+            )
+            steps = gr.Slider(20, 50, value=30, step=1, label="Inference steps")
             guidance = gr.Slider(1.0, 5.0, value=2.5, step=0.1, label="Guidance scale")
             seed = gr.Number(value=42, precision=0, label="Seed")
-            face_lock = gr.Checkbox(value=True, label="Face identity lock")
-            preserve_body = gr.Checkbox(value=True, label="Preserve body proportions")
+            face_lock = gr.Checkbox(value=True, label="Adaptive face identity lock")
+            preserve_body = gr.Checkbox(value=True, label="Align target pose to base body scale")
+
         btn = gr.Button("Generate", variant="primary")
+        status = gr.Markdown()
         with gr.Row():
             result_out = gr.Image(label="Result", type="pil", height=420)
-            compare_out = gr.Image(label="Base | Ref | Result", type="pil", height=420)
-        file_out = gr.File(label="Download result PNG")
+            compare_out = gr.Image(label="Base | Reference | Result", type="pil", height=420)
+        with gr.Accordion("Pipeline debug", open=False):
+            debug_out = gr.Gallery(
+                label="Intermediate controls/results",
+                columns=4,
+                height="auto",
+            )
+        file_out = gr.File(label="Result PNG")
 
         btn.click(
             fn=run_swap,
@@ -238,7 +306,7 @@ def build_ui() -> gr.Blocks:
                 face_lock,
                 preserve_body,
             ],
-            outputs=[result_out, compare_out, file_out],
+            outputs=[result_out, compare_out, file_out, debug_out, status],
         )
     return demo
 
@@ -246,10 +314,9 @@ def build_ui() -> gr.Blocks:
 demo = build_ui()
 
 if __name__ == "__main__":
-    # Warm setup on dedicated GPU Spaces; on ZeroGPU setup runs inside @spaces.GPU
     if os.environ.get("SPACE_HW", "").lower() not in {"zerogpu", "zero-gpu"}:
         try:
-            setup_runtime()
+            setup_runtime(require_pose=False)
         except Exception as exc:
             print("Startup setup deferred:", exc, flush=True)
     demo.queue(default_concurrency_limit=1).launch()
