@@ -1,10 +1,14 @@
 # Pose & Outfit Changer — Fidelity v3
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)
+[![Open Latest Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)
+
+**Latest Colab notebook:** https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb
+
+The notebook always fetches/resets the project to the latest `main`, clears cached project modules, reloads `colab_runner`, and prints the repository version + commit before setup so an older Colab kernel cannot silently keep running stale bootstrap code.
 
 Transfer an **outfit and/or pose** from a reference image onto a **base person**, while keeping the base person's identity and body appearance as consistent as the available models allow.
 
-Current release: **1.0.1** — Fidelity v3 plus a notebook-native Google Colab low-memory runtime.
+Current release: **1.0.3** — Fidelity v3 plus the notebook-native Google Colab low-memory runtime, corrected DensePose/Detectron2 bootstrap, and forced fresh-module reload after repository updates.
 
 ## Fidelity pipeline
 
@@ -87,9 +91,9 @@ Safety checks remain active at every strength.
 
 ## Google Colab low-memory mode
 
-The one-click notebook is designed for **managed Colab notebooks**, including standard/free-style GPU assignments. Google does not guarantee a specific GPU model, GPU availability, fixed resource quota or fixed usage limit; Colab states that hardware and limits vary dynamically. The notebook therefore measures the assigned GPU at runtime instead of assuming a T4 or a fixed amount of VRAM.
+The one-click notebook is designed for **managed Colab notebooks**, including standard/free-style GPU assignments. Google does not guarantee a specific GPU model, GPU availability, fixed resource quota or fixed usage limit; the notebook therefore measures the assigned GPU at runtime instead of assuming a T4 or a fixed amount of VRAM.
 
-The free-Colab workflow also stays inside normal notebook cells. It does **not** launch Gradio, `share=True`, a remote desktop or another web UI. This is intentional because Google currently restricts bypassing the notebook UI to interact primarily through a web UI on free managed runtimes.
+The free-Colab workflow also stays inside normal notebook cells. It does **not** launch Gradio, `share=True`, a remote desktop or another web UI.
 
 ### What low-memory mode changes
 
@@ -120,7 +124,8 @@ Additional safeguards:
 - heavyweight modules are cast to **FP16 when moved to CUDA**;
 - VAE slicing/tiling enabled when supported;
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce allocator fragmentation;
-- Detectron2 build uses `MAX_JOBS=2` to reduce compile-time RAM pressure;
+- Detectron2 build uses `MAX_JOBS=1` to reduce compile-time RAM pressure on ~13 GB Colab runtimes;
+- the DensePose-facing Detectron2 0.6 `_C` extension is compiled in place from Leffa's matching source tree;
 - real Detectron2 DensePose remains mandatory for pose transfer.
 
 ### Automatic VRAM policy
@@ -145,13 +150,14 @@ The safe profile runs diffusion at 576×768 and returns the generated result on 
 
 ### Run the Colab notebook
 
-1. Open the badge at the top of this README.
+1. Open the **Open Latest Colab** badge at the top of this README, or use the plain latest-notebook link directly below it.
 2. Choose **Runtime → Change runtime type → GPU**.
 3. Run the cells in order.
-4. The notebook reports the actual GPU, VRAM and system RAM.
-5. Upload the base image, then the reference image.
-6. Run the Generate cell. Defaults: `both`, automatic garment routing, 25 steps and retarget strength `0.65`.
-7. The notebook prints peak allocated CUDA memory and stage-specific memory policy details.
+4. Confirm Cell 1 prints the current repository `VERSION` and short Git commit before continuing.
+5. The notebook reports the actual GPU, VRAM and system RAM.
+6. Upload the base image, then the reference image.
+7. Run the Generate cell. Defaults: `both`, automatic garment routing, 25 steps and retarget strength `0.65`.
+8. The notebook prints peak allocated CUDA memory and stage-specific memory policy details.
 
 If CUDA still reports OOM, restart the runtime to clear fragmentation and use the notebook's `safe` recovery cell. Colab resource availability itself cannot be guaranteed by this repository.
 
