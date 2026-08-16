@@ -1,0 +1,77 @@
+name: Deploy Hugging Face Space
+
+on:
+  workflow_dispatch:
+    inputs:
+      space_id:
+        description: Optional Hugging Face Space ID (owner/name). Leave blank to use HF_SPACE_ID repo variable or the authenticated user's poser-outfit-changer Space.
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - "hf_space/**"
+      - "pipeline/**"
+      - "push_to_hf_space.py"
+      - ".github/workflows/deploy-hf-space.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-hf-space
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_SPACE_ID: ${{ inputs.space_id || vars.HF_SPACE_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check deployment credentials
+        id: auth
+        shell: bash
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Hugging Face deployment skipped because the GitHub Actions secret HF_TOKEN is not configured. Add a write-capable HF token as repository secret HF_TOKEN, then run this workflow manually."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install deployment dependency
+        if: steps.auth.outputs.ready == 'true'
+        run: python -m pip install --disable-pip-version-check --no-cache-dir "huggingface_hub>=0.25"
+
+      - name: Synchronize canonical pipeline into Space bundle
+        if: steps.auth.outputs.ready == 'true'
+        run: python push_to_hf_space.py --sync-only
+
+      - name: Verify deployable pipeline has no drift
+        if: steps.auth.outputs.ready == 'true'
+        run: git diff --exit-code -- hf_space/pipeline
+
+      - name: Publish to Hugging Face Spaces
+        if: steps.auth.outputs.ready == 'true'
+        run: python push_to_hf_space.py
+
+      - name: Deployment target
+        if: steps.auth.outputs.ready == 'true'
+        shell: bash
+        run: |
+          if [ -n "$HF_SPACE_ID" ]; then
+            echo "Published target: https://huggingface.co/spaces/$HF_SPACE_ID"
+          else
+            echo "Published to the authenticated Hugging Face user's poser-outfit-changer Space."
+          fi
