@@ -1,105 +1,141 @@
-# Pose & Cloth Swap — Free Google Colab App
+# Pose & Outfit Changer — Leffa + Identity/Body Preservation
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)
 
-**[▶ Open in Google Colab (one click)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)**
+Transfer an **outfit and/or pose** from a reference image onto a **base person**, while keeping the base person's identity and body appearance as consistent as the available models allow.
 
-Transfer **pose + outfit** from a reference image onto a **base person**, while keeping face identity and body proportions as consistent as possible.
+## Fidelity-first pipeline
 
-**Pipeline:** extract clothes → VTON on base body → body-aligned pose transfer → body lock → face lock  
-**Cost:** $0 — free Google Colab T4 GPU + open-source [Leffa](https://github.com/franciszzj/Leffa) models + InsightFace face lock.
-
-## How it works
-
-```
-Base person  +  Clothed person (pose + outfit)
-       │                │
-       │                ├── parse & extract clothes
-       ▼                ▼
-  Leffa VTON  ←——  garment (base body/pose kept)
+```text
+Base person + reference person
+       │             │
+       │             ├─ extract clothing
+       │             └─ target pose
+       ▼
+  Leffa VTON
        │
        ▼
-  Align pose donor to base body scale
+body-scale-align target pose
        │
        ▼
-  Leffa Pose  ←——  pose from ref, appearance from dressed base
+real DensePose IUV + Leffa pose transfer
        │
        ▼
-  Body proportion lock + Face identity lock
+adaptive face identity lock
        │
        ▼
-     Result
+     result
 ```
 
-1. **Extract outfit** — isolate clothing from the clothed reference person (default).
-2. **Outfit transfer** — put those clothes on the base person (**base body stays**).
-3. **Body-aligned pose** — scale the pose donor to the base build, then transfer pose.
-4. **Body + face lock** — restore overall body size/build and re-apply the base face.
+The project deliberately separates clothing transfer, pose transfer and identity restoration instead of asking one diffusion pass to solve everything.
 
-## Quick start (Google Colab)
+## Important accuracy rules
 
-1. Click **[Open in Colab](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)** (badge at the top of this README).
-2. **Runtime → Change runtime type → T4 GPU** (required).
-3. **Runtime → Run all** (section 1 installs packages *before* importing them — you should not need Restart session).
-4. Wait for weight download on the first run (several GB).
-5. Click the **public Gradio link** (`*.gradio.live`) when the last cell finishes.
-6. Upload:
-   - **Base image** — the person whose face/body you want to keep
-   - **Pose & Outfit image** — the pose and clothes to copy
-7. Choose mode (**Both** recommended) → **Generate** → download the PNG.
+- **Pose transfer requires real Detectron2 DensePose.** The parsing-based fallback is allowed only for virtual try-on. It is not used as fake IUV conditioning for pose transfer.
+- **No silent mode downgrade.** Selecting `Both` or `Pose only` either runs pose transfer or returns a clear error explaining what is missing.
+- **No final-image body stretching.** The previous crop/resize/paste body correction and torso pixel blending are disabled because they could damage limbs, pose geometry and backgrounds.
+- **Body preservation happens before pose diffusion.** The target-pose person is uniformly scaled/recentered to the base person's on-canvas body scale before DensePose extraction.
+- **Face lock is head-angle aware.** Strong frontal-face pasting is reduced or skipped when the generated head is profile/turned enough that a 2-D affine face warp would look wrong.
+- **VTON model selection is automatic.** `VITON-HD` is used for upper-body clothing and `DressCode` for lower-body or full-outfit/dress transfer.
 
-If Colab still asks to restart: **Runtime → Disconnect and delete runtime**, reopen the notebook, and run from the top again.
+## Inputs
 
-## UI options
+- **Base image** — identity/body appearance to keep.
+- **Reference image** — pose and/or clothes to copy.
 
-| Control | Meaning |
-|---------|---------|
-| Mode: Both | Outfit then pose then face lock (full swap) |
-| Mode: Outfit only | Change clothes only, keep base pose |
-| Mode: Pose only | Change pose only, keep base clothes |
-| Garment region | Upper / Lower / Dress — which area VTON replaces |
-| Face identity lock | Paste/refine base face onto the result |
-| Steps / seed | Quality vs speed; seed for reproducibility |
+Clear, well-lit full-body images generally produce the best results. Extreme occlusion, back-facing heads, unusual crops and very different camera perspectives remain difficult for current diffusion models.
+
+## Modes
+
+| Mode | What happens |
+|---|---|
+| **Both** | Outfit transfer, then real-DensePose pose transfer, then adaptive face lock |
+| **Outfit only** | Change clothing while keeping the base pose |
+| **Pose only** | Transfer the target pose while keeping the base appearance |
+
+For garment regions, choose `Upper`, `Lower`, or `Dress / full outfit`.
+
+## Hugging Face Space
+
+The `hf_space/` app now treats pose fidelity as a hard requirement:
+
+1. It does **not** fake `SPACE_ID` locally.
+2. It does **not** remove Leffa's vendored Detectron2 source.
+3. When a pose mode is requested, it checks for Detectron2's compiled `_C` extension.
+4. If needed, it attempts to build/install Leffa's vendored Detectron2 package.
+5. If real DensePose still cannot load, pose generation stops with a clear error instead of using the fallback predictor.
+
+The Space UI also exposes intermediate debug images such as the extracted garment, VTON mask, DensePose control, body-aligned target pose and post-pose result.
+
+## Google Colab
+
+Free Colab remains memory-constrained because Leffa pose transfer uses an SDXL-based checkpoint. The Python pipeline therefore disables pose by default when it detects a normal Colab runtime.
+
+To force pose on a suitable Colab GPU, set this **before** creating `PoseClothPipeline`:
+
+```python
+import os
+os.environ["LEFFA_ALLOW_POSE"] = "1"
+```
+
+You still need a working real Detectron2 DensePose installation. If the GPU/RAM is too small, use `Outfit only` or a larger runtime rather than accepting an inaccurate fallback pose.
 
 ## Project layout
 
-```
-Pose&Cloth Changer/
-├── Pose_Cloth_Changer.ipynb   # Main Colab notebook (self-contained)
+```text
+Poser-Outfit-Changer/
+├── Pose_Cloth_Changer.ipynb
 ├── README.md
-└── pipeline/
-    ├── __init__.py
-    ├── face_lock.py           # InsightFace face identity lock
-    ├── leffa_sequential.py    # VTON → pose → face, one model in VRAM at a time
-    └── memory.py              # CUDA cache cleanup
+├── push_to_hf_space.py
+├── requirements.txt
+├── pipeline/
+│   ├── __init__.py
+│   ├── body_lock.py
+│   ├── densepose_fallback.py
+│   ├── face_lock.py
+│   ├── garment_extract.py
+│   ├── leffa_sequential.py
+│   └── memory.py
+├── hf_space/
+│   ├── app.py
+│   ├── README.md
+│   ├── requirements.txt
+│   └── pipeline/
+└── tests/
+    └── test_fidelity_helpers.py
 ```
 
-The notebook writes the same `pipeline/` helpers into `/content` so you can run from Colab without uploading the whole repo. The local `pipeline/` folder is the editable source of truth.
+`pipeline/` is the canonical editable source. `push_to_hf_space.py` now copies its Python files into `hf_space/pipeline/` before deployment so the Space cannot accidentally deploy stale pipeline code.
 
-## Free-tier tips
+## Validation
 
-- **Free Colab:** use **Outfit only** (default). Pose/Both uses SDXL and often restarts the kernel.
-- **First run is slow** — models download from Hugging Face once per session.
-- **Session disconnects** — Colab free runtimes time out; re-run install + download cells after reconnect.
-- **CUDA out of memory** — switch to *Outfit only* or *Pose only*, or lower steps to ~20. The pipeline unloads each diffusion model between stages to fit ~15GB T4 VRAM.
-- **Better face consistency** — use a clear, well-lit base photo with a visible face; keep Face lock enabled.
-- **Better clothes transfer** — full-body shots work best; set garment region to match (upper / lower / dress).
-- Optional: mount Google Drive and point `ckpt_dir` there so weights survive session resets.
+Lightweight regression tests cover the new fidelity policies:
 
-## Requirements (Colab installs these for you)
+```bash
+python -m unittest discover -s tests -v
+```
 
-- NVIDIA GPU (Colab T4 is enough)
-- PyTorch (preinstalled on Colab)
-- Leffa + detectron2 + InsightFace + Gradio
+These tests do not run the multi-GB diffusion checkpoints; full image-quality validation still requires a GPU and representative base/reference image pairs.
 
-## Limits (honest)
+## Requirements
 
-Diffusion models cannot guarantee literal pixel-perfect “100%” identity. This app maximizes consistency with a staged pipeline and a face-lock pass. Results vary with lighting, occlusion, extreme poses, and resolution.
+- NVIDIA GPU for Leffa inference
+- PyTorch / torchvision
+- Leffa checkpoints
+- SCHP/OpenPose preprocessing
+- Detectron2 + DensePose for pose modes
+- InsightFace for adaptive identity lock
+- Gradio for the app
 
-Models used for try-on/pose are trained on academic datasets (VITON-HD / DressCode / DeepFashion). Use for personal / research purposes; check upstream licenses before commercial use.
+## Limits
+
+No diffusion pipeline can guarantee literal pixel-perfect identity or body geometry from a single image. The goal here is to avoid known fidelity-destroying shortcuts and make every fallback explicit. Results still vary with pose extremity, clothing occlusion, face visibility, source resolution and model training distribution.
+
+The upstream Leffa try-on/pose models are trained on academic fashion/person datasets. Check Leffa, Detectron2, InsightFace and checkpoint licenses before commercial deployment.
 
 ## Credits
 
-- [Leffa](https://github.com/franciszzj/Leffa) — pose transfer & virtual try-on  
-- [InsightFace](https://github.com/deepinsight/insightface) — face detection / identity lock  
-- DensePose / SCHP / OpenPose — preprocessing (via Leffa)
+- [Leffa](https://github.com/franciszzj/Leffa) — virtual try-on and pose transfer
+- [InsightFace](https://github.com/deepinsight/insightface) — face detection / pose-aware identity lock
+- Detectron2 DensePose — real body-surface conditioning for pose transfer
+- SCHP / OpenPose — human parsing and pose preprocessing
