@@ -7,6 +7,7 @@ env/
 Leffa/
 ckpts/
 outputs/
+benchmark_runs/
 *.pth
 *.onnx
 *.pkl
