@@ -22,7 +22,7 @@ from .pose_geometry import (
     R_SHOULDER,
 )
 
-# Triplets are (point A, vertex B, point C).  They measure the major limb and
+# Triplets are (point A, vertex B, point C). They measure the major limb and
 # torso articulations while remaining invariant to global translation/scale.
 ANGLE_TRIPLETS = (
     (NECK, R_SHOULDER, 3),
@@ -121,14 +121,18 @@ def body_proportion_error(
     base_points: np.ndarray,
     base_valid: np.ndarray,
 ) -> float | None:
-    """Median multiplicative proportion error; 0.10 roughly means ~10% mismatch."""
+    """RMS multiplicative proportion error; 0.10 is roughly a 10% aggregate mismatch."""
     got = normalized_bone_profile(generated_points, generated_valid)
     wanted = normalized_bone_profile(base_points, base_valid)
     common = sorted(set(got) & set(wanted))
     if len(common) < 4:
         return None
-    log_errors = [abs(math.log(max(got[k], 1e-6) / max(wanted[k], 1e-6))) for k in common]
-    return float(math.expm1(float(np.median(log_errors))))
+    log_errors = np.asarray(
+        [math.log(max(got[k], 1e-6) / max(wanted[k], 1e-6)) for k in common],
+        dtype=np.float32,
+    )
+    rms_log_error = float(np.sqrt(np.mean(np.square(log_errors))))
+    return float(math.expm1(rms_log_error))
 
 
 def composite_fidelity_score(
