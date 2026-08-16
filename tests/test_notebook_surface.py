@@ -42,7 +42,9 @@ class NotebookSurfaceTests(unittest.TestCase):
         self.assertIn("garment_type='auto'", self.code_text)
         self.assertIn("pose_retarget_strength=0.65", self.code_text)
         self.assertIn("mode='both'", self.code_text)
-        self.assertIn("prepare_colab(resolution='safe'", self.code_text)
+        # The safe fallback is documented as an optional Markdown code block so
+        # it is not accidentally executed during the normal full-resolution run.
+        self.assertIn("prepare_colab(resolution='safe'", self.text)
 
 
 if __name__ == "__main__":
