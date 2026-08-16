@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.3 — 2026-08-16
+
+### Google Colab stale-module refresh fix
+
+- Force Cell 1 to fetch/reset the project clone to the latest `origin/main` and then evict previously imported `colab_runner` and `pipeline.*` modules from `sys.modules`.
+- Invalidate Python import caches and put `/content/Poser-Outfit-Changer` first on `sys.path` so Cell 2 cannot keep executing an older runner after files are updated on disk.
+- Explicitly reload `colab_runner` in Cell 2 and print its source path before pipeline setup.
+- Print the project `VERSION` and short Git commit after bootstrap so stale Colab sessions are immediately visible.
+- Change the notebook-level Detectron2 compile setting from `MAX_JOBS=2` to `MAX_JOBS=1`, matching the v1.0.2 low-RAM builder for standard ~13 GB Colab system RAM.
+- Add notebook regression coverage for module eviction, cache invalidation, explicit reload, version/commit reporting, and the one-worker compile policy.
+
 ## 1.0.2 — 2026-08-16
 
 ### Google Colab Detectron2 bootstrap fix
@@ -24,7 +35,7 @@
 - On GPUs below 20 GB VRAM, run SDXL pose transfer with a single denoising batch instead of classifier-free-guidance batch doubling.
 - Choose diffusion resolution from measured VRAM: full 768×1024 for >=14 GB, balanced 672×896 for >=11 GB, and safe 576×768 below that; allow explicit `full`, `balanced`, or `safe` override.
 - Enable VAE slicing/tiling when supported and use PyTorch expandable CUDA segments to reduce fragmentation.
-- Limit Detectron2 compilation parallelism with `MAX_JOBS=2` in the Colab setup path to reduce setup RAM pressure.
+- Limit Detectron2 compilation parallelism with `MAX_JOBS=2` in the initial Colab setup path; v1.0.2/v1.0.3 reduce the effective notebook/build setting to one worker on low-RAM runtimes.
 - Add separate VTON and pose memory diagnostics plus peak CUDA allocation reporting.
 
 ### Colab notebook
