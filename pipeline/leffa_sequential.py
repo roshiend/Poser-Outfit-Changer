@@ -1,8 +1,12 @@
 """
-Sequential Leffa runner for Colab T4 (~15GB).
+Sequential Leffa runner designed for identity-safe outfit + pose transfer.
 
-Loads at most one diffusion checkpoint at a time:
-  VTON -> unload -> Pose transfer -> unload -> face lock.
+Only one diffusion checkpoint is kept in VRAM at a time:
+  VTON -> unload -> Pose transfer -> unload -> adaptive face lock.
+
+Pose transfer intentionally requires real Detectron2 DensePose. A parsing-based
+fallback is still allowed for virtual try-on on constrained hardware, but it is
+not geometrically accurate enough to drive pose transfer.
 """
 
 from __future__ import annotations
@@ -15,12 +19,7 @@ from typing import Literal, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 
-from .body_lock import (
-    align_pose_donor_to_base_body,
-    match_result_body_to_base,
-    person_bbox_from_parse,
-    soft_preserve_torso,
-)
+from .body_lock import align_pose_donor_to_base_body, person_bbox_from_parse
 from .face_lock import lock_face_identity
 from .garment_extract import extract_garment_from_person
 from .memory import cuda_mem_report, free_vram
@@ -28,11 +27,39 @@ from .memory import cuda_mem_report, free_vram
 PathLike = Union[str, Path, Image.Image]
 Mode = Literal["both", "outfit_only", "pose_only"]
 RefKind = Literal["clothed_person", "flat_garment"]
+VtonModel = Literal["auto", "viton_hd", "dress_code"]
 
 
-def _in_colab() -> bool:
-    # Treat Hugging Face Spaces like Colab for memory-safe defaults.
-    return Path("/content").exists() or bool(os.environ.get("SPACE_ID"))
+class DensePoseUnavailableError(RuntimeError):
+    """Raised when a pose operation is requested without real DensePose."""
+
+
+def _is_hf_space() -> bool:
+    return bool(os.environ.get("SPACE_ID") or os.environ.get("SPACE_HW"))
+
+
+def _is_colab() -> bool:
+    return Path("/content").exists() and not _is_hf_space()
+
+
+def _pose_allowed() -> bool:
+    override = os.environ.get("LEFFA_ALLOW_POSE", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    return not _is_colab()
+
+
+def _resolve_vton_model(
+    garment_type: str,
+    requested: VtonModel,
+) -> Literal["viton_hd", "dress_code"]:
+    if requested not in {"auto", "viton_hd", "dress_code"}:
+        raise ValueError(f"Unknown VTON model: {requested}")
+    if requested != "auto":
+        return requested
+    return "viton_hd" if garment_type == "upper_body" else "dress_code"
 
 
 def _ensure_leffa_on_path(leffa_root: Path) -> None:
@@ -48,15 +75,7 @@ def _as_pil(image: PathLike) -> Image.Image:
 
 
 class PoseClothPipeline:
-    """
-    Identity-safe pose + outfit transfer.
-
-    Inputs
-    ------
-    base_image : person whose face / body proportions must stay consistent
-    ref_image  : usually a **person wearing clothes** (pose + outfit source).
-                 Flat product garment photos also work if ref_kind='flat_garment'.
-    """
+    """Transfer outfit and/or pose while keeping the base person's appearance."""
 
     def __init__(
         self,
@@ -73,21 +92,19 @@ class PoseClothPipeline:
         self.enable_face_lock = enable_face_lock
         self.default_ref_kind = default_ref_kind
         self.preserve_body = preserve_body
-        # Free Colab: VTON (SD1.5) can work; pose (SDXL) usually kills the kernel.
-        self.colab_safe = _in_colab() and os.environ.get("LEFFA_ALLOW_POSE", "").strip() != "1"
+        self.pose_enabled = _pose_allowed()
 
         _ensure_leffa_on_path(self.leffa_root)
 
-        # Lazy-loaded preprocess / model handles
         self._parsing = None
         self._openpose = None
         self._densepose = None
+        self._densepose_is_real = False
         self._vt_inference = None
         self._pt_inference = None
         self._face_app = None
         self._active_model: Optional[str] = None
 
-    # ------------------------------------------------------------------ setup
     def download_checkpoints(self) -> None:
         from huggingface_hub import snapshot_download
 
@@ -96,45 +113,25 @@ class PoseClothPipeline:
         snapshot_download(repo_id="franciszzj/Leffa", local_dir=str(self.ckpt_dir))
         print("Checkpoints ready at", self.ckpt_dir)
 
-    def _load_preprocessors(self) -> None:
-        if self._parsing is not None:
-            return
+    def _load_preprocessors(self, require_real_densepose: bool = False) -> None:
+        if self._parsing is None or self._openpose is None:
+            from preprocess.humanparsing.run_parsing import Parsing
+            from preprocess.openpose.run_openpose import OpenPose
 
-        from preprocess.humanparsing.run_parsing import Parsing
-        from preprocess.openpose.run_openpose import OpenPose
-
-        ckpt = self.ckpt_dir
-        self._parsing = Parsing(
-            atr_path=str(ckpt / "humanparsing" / "parsing_atr.onnx"),
-            lip_path=str(ckpt / "humanparsing" / "parsing_lip.onnx"),
-        )
-        self._openpose = OpenPose(
-            body_model_path=str(ckpt / "openpose" / "body_pose_model.pth"),
-        )
-        self._densepose = self._make_densepose()
-
-    def _make_densepose(self):
-        """
-        Prefer lightweight fallback on Colab T4 to avoid OOM when VTON loads.
-
-        Detectron2 DensePose + diffusion often exceeds ~15GB. Set
-        LEFFA_REAL_DENSEPOSE=1 to force the real predictor.
-        """
-        import os
-
-        ckpt = self.ckpt_dir
-        in_colab = Path("/content").exists() or bool(os.environ.get("SPACE_ID"))
-        force_real = os.environ.get("LEFFA_REAL_DENSEPOSE", "").strip() == "1"
-
-        if (in_colab or bool(os.environ.get("SPACE_ID"))) and not force_real:
-            print(
-                "[densepose] Shared GPU / Colab mode: using fallback DensePose to save VRAM. "
-                "Set LEFFA_REAL_DENSEPOSE=1 only if you have spare VRAM."
+            ckpt = self.ckpt_dir
+            self._parsing = Parsing(
+                atr_path=str(ckpt / "humanparsing" / "parsing_atr.onnx"),
+                lip_path=str(ckpt / "humanparsing" / "parsing_lip.onnx"),
             )
-            from .densepose_fallback import FallbackDensePosePredictor
+            self._openpose = OpenPose(
+                body_model_path=str(ckpt / "openpose" / "body_pose_model.pth"),
+            )
 
-            return FallbackDensePosePredictor(parsing_fn=self._parsing)
+        if self._densepose is None or (require_real_densepose and not self._densepose_is_real):
+            self._densepose = self._make_densepose(require_real=require_real_densepose)
 
+    def _make_densepose(self, require_real: bool = False):
+        ckpt = self.ckpt_dir
         try:
             import av  # noqa: F401
             import detectron2  # noqa: F401
@@ -145,17 +142,26 @@ class PoseClothPipeline:
                 config_path=str(ckpt / "densepose" / "densepose_rcnn_R_50_FPN_s1x.yaml"),
                 weights_path=str(ckpt / "densepose" / "model_final_162be9.pkl"),
             )
+            self._densepose_is_real = True
             print("[densepose] Using Detectron2 DensePose")
             return pred
         except Exception as exc:
-            print(f"[densepose] Real DensePose unavailable ({exc!r}); using fallback")
+            self._densepose_is_real = False
+            if require_real:
+                raise DensePoseUnavailableError(
+                    "Pose transfer requires real Detectron2 DensePose, but it could not be loaded. "
+                    "Install/build Detectron2 for the current PyTorch environment, then retry. "
+                    f"Original error: {exc!r}"
+                ) from exc
+
+            print(f"[densepose] Real DensePose unavailable ({exc!r}); using VTON-only fallback")
             from .densepose_fallback import FallbackDensePosePredictor
 
             return FallbackDensePosePredictor(parsing_fn=self._parsing)
 
     def _unload_preprocessors(self) -> None:
-        """Drop DensePose/parsing/openpose before loading diffusion models."""
         self._densepose = None
+        self._densepose_is_real = False
         self._parsing = None
         self._openpose = None
         free_vram()
@@ -170,9 +176,7 @@ class PoseClothPipeline:
         cuda_mem_report("after diffusion unload")
 
     def _build_leffa_model(self, pretrained_dir: str, weight_path: str):
-        """Load Leffa weights with lower CPU RAM peaks, then free caches."""
         import gc
-
         import torch
         from leffa.model import LeffaModel
 
@@ -198,15 +202,16 @@ class PoseClothPipeline:
         free_vram()
         return model
 
-    def _load_vton(self, model_type: str = "viton_hd") -> None:
+    def _load_vton(
+        self,
+        model_type: Literal["viton_hd", "dress_code"] = "viton_hd",
+    ) -> None:
         if self._active_model == f"vton_{model_type}" and self._vt_inference is not None:
             return
         self._unload_diffusion()
 
-        print(f"[load] Loading VTON ({model_type}) — may take 1–3 min on Colab...")
-        print("[load] If Gradio shows 'Broken Connection', watch this notebook log.")
+        print(f"[load] Loading VTON ({model_type})...")
         cuda_mem_report("before VTON load")
-
         from leffa.inference import LeffaInference
 
         weight = (
@@ -218,7 +223,6 @@ class PoseClothPipeline:
             str(self.ckpt_dir / "stable-diffusion-inpainting"),
             str(weight),
         )
-        print("[load] Moving VTON to GPU...")
         self._vt_inference = LeffaInference(model=model)
         self._active_model = f"vton_{model_type}"
         free_vram()
@@ -230,16 +234,14 @@ class PoseClothPipeline:
             return
         self._unload_diffusion()
 
-        print("[load] Loading pose-transfer (SDXL) — heavy; may OOM on free Colab...")
+        print("[load] Loading pose-transfer (SDXL)...")
         cuda_mem_report("before pose load")
-
         from leffa.inference import LeffaInference
 
         model = self._build_leffa_model(
             str(self.ckpt_dir / "stable-diffusion-xl-1.0-inpainting-0.1"),
             str(self.ckpt_dir / "pose_transfer.pth"),
         )
-        print("[load] Moving pose model to GPU...")
         self._pt_inference = LeffaInference(model=model)
         self._active_model = "pose"
         free_vram()
@@ -247,14 +249,14 @@ class PoseClothPipeline:
         print("[load] Pose-transfer model ready")
 
     def preload_colab(self, include_pose: bool = False) -> None:
-        """Optional warmup. Skip on free Colab if it previously crashed the kernel."""
-        if self.colab_safe and not include_pose:
-            print("[preload] Skipping auto-preload on free Colab (prevents RAM OOM).")
-            print("[preload] VTON will load on first Generate instead.")
-            return
         print("[preload] Warming VTON...")
         self._load_vton("viton_hd")
         if include_pose:
+            if not self.pose_enabled:
+                raise RuntimeError(
+                    "Pose is disabled for this Colab runtime by default. Set LEFFA_ALLOW_POSE=1 "
+                    "before constructing PoseClothPipeline to force it."
+                )
             self._load_pose()
         print("[preload] Done.")
 
@@ -264,10 +266,7 @@ class PoseClothPipeline:
         try:
             from insightface.app import FaceAnalysis
 
-            app = FaceAnalysis(
-                name="buffalo_l",
-                providers=["CPUExecutionProvider"],
-            )
+            app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
             app.prepare(ctx_id=-1, det_size=(640, 640))
             self._face_app = app
         except Exception as exc:
@@ -280,10 +279,9 @@ class PoseClothPipeline:
         person: Image.Image,
         garment_type: str,
     ) -> Image.Image:
-        """Parse a clothed person and isolate their outfit for VTON."""
         from leffa_utils.utils import resize_and_center
 
-        self._load_preprocessors()
+        self._load_preprocessors(require_real_densepose=False)
         person = resize_and_center(person.convert("RGB"), 768, 1024)
         parse_map, _ = self._parsing(person.resize((384, 512)))
         garment = extract_garment_from_person(
@@ -295,7 +293,6 @@ class PoseClothPipeline:
         print(f"[garment] Extracted {garment_type} clothing from clothed-person ref")
         return garment
 
-    # --------------------------------------------------------------- inference
     def _run_control(
         self,
         src_image: Image.Image,
@@ -305,10 +302,10 @@ class PoseClothPipeline:
         scale: float = 2.5,
         seed: int = 42,
         ref_acceleration: bool = True,
-        vt_model_type: str = "viton_hd",
+        vt_model_type: Literal["viton_hd", "dress_code"] = "viton_hd",
         vt_garment_type: str = "upper_body",
         vt_repaint: bool = False,
-    ) -> Image.Image:
+    ) -> tuple[Image.Image, Image.Image, Image.Image]:
         from leffa.transform import LeffaTransform
         from leffa_utils.utils import (
             get_agnostic_mask_dc,
@@ -316,7 +313,8 @@ class PoseClothPipeline:
             resize_and_center,
         )
 
-        self._load_preprocessors()
+        require_real = control_type == "pose_transfer"
+        self._load_preprocessors(require_real_densepose=require_real)
 
         src_image = resize_and_center(src_image.convert("RGB"), 768, 1024)
         ref_image = resize_and_center(ref_image.convert("RGB"), 768, 1024)
@@ -337,12 +335,15 @@ class PoseClothPipeline:
                 iuv = self._densepose.predict_iuv(src_array)
                 seg = np.concatenate([iuv[:, :, 0:1]] * 3, axis=-1)
             densepose = Image.fromarray(seg)
-            # Critical on Colab: free DensePose VRAM before loading VTON
             self._unload_preprocessors()
             free_vram()
             self._load_vton(vt_model_type)
             inference = self._vt_inference
         else:
+            if not self._densepose_is_real:
+                raise DensePoseUnavailableError(
+                    "Pose transfer cannot run with fallback DensePose."
+                )
             mask = Image.fromarray(np.ones_like(src_array) * 255)
             iuv = self._densepose.predict_iuv(src_array)[:, :, ::-1]
             densepose = Image.fromarray(iuv)
@@ -366,7 +367,8 @@ class PoseClothPipeline:
             seed=int(seed),
             repaint=vt_repaint if control_type == "virtual_tryon" else False,
         )
-        return output["generated_image"][0].convert("RGB")
+        generated = output["generated_image"][0].convert("RGB")
+        return generated, mask.convert("RGB"), densepose.convert("RGB")
 
     def generate(
         self,
@@ -374,7 +376,7 @@ class PoseClothPipeline:
         ref_image: PathLike,
         mode: Mode = "both",
         garment_type: str = "upper_body",
-        vt_model_type: str = "viton_hd",
+        vt_model_type: VtonModel = "auto",
         steps: int = 30,
         guidance_scale: float = 2.5,
         seed: int = 42,
@@ -384,62 +386,48 @@ class PoseClothPipeline:
         preserve_body: Optional[bool] = None,
         return_debug: bool = False,
     ) -> Image.Image | Tuple[Image.Image, dict]:
-        """
-        Run outfit and/or pose transfer with face + body consistency.
-
-        Default ref_kind='clothed_person': the pose/outfit image is a person
-        wearing clothes. Clothing is parsed out for VTON; the full person
-        image is still used for pose transfer.
-
-        Body consistency (default on): scale-align the pose donor to the base
-        body, lightly preserve torso build after posing, then re-match overall
-        body size to the base person — plus face identity lock.
-        """
         from leffa_utils.utils import resize_and_center
+
+        if mode not in {"both", "outfit_only", "pose_only"}:
+            raise ValueError(f"Unknown mode: {mode}")
+        if garment_type not in {"upper_body", "lower_body", "dresses"}:
+            raise ValueError(f"Unknown garment type: {garment_type}")
+        if mode in {"both", "pose_only"} and not self.pose_enabled:
+            raise RuntimeError(
+                "Pose transfer is disabled on this Colab runtime because the SDXL pose model often "
+                "exceeds free-tier memory. Nothing was silently downgraded. Use Outfit only, move "
+                "to a larger GPU, or set LEFFA_ALLOW_POSE=1 before creating the pipeline."
+            )
 
         base = _as_pil(base_image)
         ref = _as_pil(ref_image)
         kind = ref_kind or self.default_ref_kind
         do_face = self.enable_face_lock if face_lock is None else face_lock
         do_body = self.preserve_body if preserve_body is None else preserve_body
-        debug: dict = {}
-
-        # Free Colab cannot reliably run SD1.5 VTON + SDXL pose in one session.
-        if self.colab_safe and mode in ("both", "pose_only"):
-            print(
-                "[colab] Free Colab kernel OOM risk: pose model is SDXL.\n"
-                "[colab] Switching to Outfit only (keeps your face/body, changes clothes).\n"
-                "[colab] To force pose anyway: Runtime cell → "
-                "import os; os.environ['LEFFA_ALLOW_POSE']='1' then recreate pipe."
-            )
-            if mode == "pose_only":
-                raise RuntimeError(
-                    "Pose-only is disabled on free Colab by default (SDXL OOM). "
-                    "Set LEFFA_ALLOW_POSE=1 to override."
-                )
-            mode = "outfit_only"
+        selected_vton = _resolve_vton_model(garment_type, vt_model_type)
+        debug: dict = {"selected_vton_model": selected_vton}
 
         base = resize_and_center(base, 768, 1024)
         ref = resize_and_center(ref, 768, 1024)
 
         current = base
         base_bbox = None
-        if do_body:
-            self._load_preprocessors()
+        if do_body and mode in {"both", "pose_only"}:
+            self._load_preprocessors(require_real_densepose=False)
             base_parse, _ = self._parsing(base.resize((384, 512)))
             base_bbox = person_bbox_from_parse(
                 base_parse.resize((768, 1024), Image.NEAREST)
             )
 
-        if mode in ("both", "outfit_only"):
-            print("Step 1/2: Outfit transfer (VTON) — clothes onto base body...")
+        if mode in {"both", "outfit_only"}:
+            print(f"Step 1/2: Outfit transfer using {selected_vton}...")
             if kind == "clothed_person":
                 vton_ref = self._garment_ref_from_clothed_person(ref, garment_type)
                 debug["garment_ref"] = vton_ref.copy()
             else:
                 vton_ref = ref
-            # VTON keeps the base person's pose and body proportions.
-            current = self._run_control(
+
+            current, vt_mask, vt_densepose = self._run_control(
                 src_image=current,
                 ref_image=vton_ref,
                 control_type="virtual_tryon",
@@ -447,20 +435,21 @@ class PoseClothPipeline:
                 scale=guidance_scale,
                 seed=seed,
                 ref_acceleration=ref_acceleration,
-                vt_model_type=vt_model_type,
+                vt_model_type=selected_vton,
                 vt_garment_type=garment_type,
             )
+            debug["outfit_mask"] = vt_mask
+            debug["outfit_densepose"] = vt_densepose
             debug["after_vton"] = current.copy()
             self._unload_diffusion()
 
-        dressed_before_pose = current.copy()
-
-        if mode in ("both", "pose_only"):
-            print("Step 2/2: Pose transfer — keep base body build, take pose from ref...")
+        if mode in {"both", "pose_only"}:
+            print("Step 2/2: Pose transfer with real DensePose...")
             appearance = current if mode == "both" else base
             pose_src = ref
+
             if do_body:
-                self._load_preprocessors()
+                self._load_preprocessors(require_real_densepose=False)
                 donor_parse, _ = self._parsing(ref.resize((384, 512)))
                 donor_bbox = person_bbox_from_parse(
                     donor_parse.resize((768, 1024), Image.NEAREST)
@@ -473,7 +462,7 @@ class PoseClothPipeline:
                 )
                 debug["aligned_pose_donor"] = pose_src.copy()
 
-            current = self._run_control(
+            current, pose_mask, pose_densepose = self._run_control(
                 src_image=pose_src,
                 ref_image=appearance,
                 control_type="pose_transfer",
@@ -482,31 +471,20 @@ class PoseClothPipeline:
                 seed=seed,
                 ref_acceleration=ref_acceleration,
             )
+            debug["pose_mask"] = pose_mask
+            debug["pose_densepose"] = pose_densepose
             debug["after_pose"] = current.copy()
             self._unload_diffusion()
 
-            if do_body:
-                print("Body proportion lock...")
-                current = soft_preserve_torso(
-                    posed=current,
-                    dressed_base=dressed_before_pose,
-                    strength=0.20,
-                )
-                current = match_result_body_to_base(
-                    result=current,
-                    base_person=base,
-                    base_bbox=base_bbox,
-                )
-                debug["after_body_lock"] = current.copy()
-
         if do_face:
-            print("Face identity lock...")
-            blend = 0.75 if mode == "outfit_only" else 0.92
+            print("Adaptive face identity lock...")
+            requested_blend = 0.72 if mode == "outfit_only" else 0.84
             current = lock_face_identity(
                 base_image=base,
                 generated_image=current,
                 face_app=self._get_face_app(),
-                blend=blend,
+                blend=requested_blend,
+                adaptive_pose=True,
             )
             debug["after_face_lock"] = current.copy()
 
