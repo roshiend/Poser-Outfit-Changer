@@ -199,4 +199,6 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
         self._last_inference_info = info
         if info:
             debug["colab_memory"] = info
+            if control_type in {"virtual_tryon", "pose_transfer"}:
+                debug[f"{control_type}_memory"] = info
         return generated, mask, densepose, debug

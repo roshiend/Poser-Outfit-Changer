@@ -67,6 +67,8 @@ def choose_colab_policy(
     else:
         width, height = 576, 768
 
+    # SDXL pose is the difficult case. On sub-20-GB GPUs, avoiding CFG halves
+    # the denoiser/reference batch and materially reduces activation memory.
     if control_type == "pose_transfer" and total < 20.0:
         use_cfg = False
         reason = "SDXL pose on <20GB VRAM: staged modules + single-batch denoising"
@@ -114,6 +116,13 @@ def _release_cuda() -> None:
 
 
 def _resize_inputs_for_policy(src, ref, mask, densepose, policy):
+    """Resize already-transformed tensors before they ever touch CUDA.
+
+    Leffa's public transform produces 768x1024 tensors. On unusually small
+    Colab GPUs we downsize those CPU tensors for diffusion, then upscale the
+    generated PIL result back to the canonical 768x1024 canvas. DensePose and
+    masks use nearest-neighbour interpolation so body labels are not blurred.
+    """
     import torch.nn.functional as F
 
     original_hw = tuple(src.shape[-2:])
@@ -224,6 +233,7 @@ class StagedLeffaInference:
         reference_features = None
         latent = None
         try:
+            # Stage 1: VAE encode only.
             self._to_cuda(vae)
             dtype = vae.dtype
             src = src_cpu.to(self.device, dtype=dtype)
@@ -259,6 +269,8 @@ class StagedLeffaInference:
                 mask_latent = torch.cat([mask_latent] * 2)
                 densepose_latent = torch.cat([densepose_latent] * 2)
 
+            # Stage 2: reference UNet. Ref acceleration is mandatory here: the
+            # reference features are computed once, then that UNet leaves CUDA.
             self._to_cuda(ref_unet)
             mid_t = timesteps[max(0, num_inference_steps // 2)]
             with torch.inference_mode():
@@ -272,6 +284,8 @@ class StagedLeffaInference:
             del ref_latent
             self._to_cpu(ref_unet)
 
+            # Stage 3: only the generative UNet is resident with the control
+            # latents/reference features during the denoising loop.
             self._to_cuda(gen_unet)
             extra_step_kwargs = {}
             step_params = set(inspect.signature(scheduler.step).parameters)
@@ -324,6 +338,7 @@ class StagedLeffaInference:
             reference_features = None
             _release_cuda()
 
+            # Stage 4: VAE decode only.
             self._to_cuda(vae)
             with torch.inference_mode():
                 decoded = vae.decode(latent / vae.config.scaling_factor).sample
@@ -360,6 +375,8 @@ class StagedLeffaInference:
                 "then set LEFFA_COLAB_RESOLUTION=safe before creating the pipeline."
             ) from exc
         finally:
+            # Always return heavyweight modules to CPU so an exception does not
+            # leave the Colab runtime permanently full.
             for module in (vae, ref_unet, gen_unet):
                 try:
                     module.to("cpu")
