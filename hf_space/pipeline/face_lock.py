@@ -58,6 +58,34 @@ def _pose_xyz(face) -> np.ndarray | None:
     return arr[:3] if arr.size >= 3 else None
 
 
+def _embedding_similarity(src_face, dst_face) -> float | None:
+    """Cosine similarity from InsightFace normalized identity embeddings."""
+    src = getattr(src_face, "normed_embedding", None)
+    dst = getattr(dst_face, "normed_embedding", None)
+    if src is None or dst is None:
+        return None
+    src = np.asarray(src, dtype=np.float32).reshape(-1)
+    dst = np.asarray(dst, dtype=np.float32).reshape(-1)
+    if src.size == 0 or dst.size == 0 or src.size != dst.size:
+        return None
+    return float(np.clip(np.dot(src, dst), -1.0, 1.0))
+
+
+def face_identity_similarity(
+    base_image: Image.Image | np.ndarray,
+    generated_image: Image.Image | np.ndarray,
+    face_app,
+) -> float | None:
+    """Measure largest-face identity similarity without modifying the images."""
+    if face_app is None:
+        return None
+    base_face = _largest_face(face_app.get(_to_bgr(base_image)))
+    gen_face = _largest_face(face_app.get(_to_bgr(generated_image)))
+    if base_face is None or gen_face is None:
+        return None
+    return _embedding_similarity(base_face, gen_face)
+
+
 def _adaptive_face_blend(src_face, dst_face, requested: float) -> float:
     """Reduce/disable 2-D face pasting when head orientations differ too much."""
     blend = float(np.clip(requested, 0.0, 1.0))
@@ -79,22 +107,53 @@ def _adaptive_face_blend(src_face, dst_face, requested: float) -> float:
     return min(blend, 0.82)
 
 
+def _identity_adjusted_blend(current: float, similarity: float | None) -> float:
+    """Use identity similarity without undoing pose-based face safety limits."""
+    current = float(np.clip(current, 0.0, 1.0))
+    if similarity is None or current <= 0.01:
+        return current
+
+    # A low score must never override a blend that was reduced because the head
+    # is turned/profile. Only frontal-compatible blends can be strengthened.
+    if current < 0.70:
+        return current
+
+    if similarity < 0.20:
+        return min(0.88, current + 0.14)
+    if similarity < 0.35:
+        return min(0.86, current + 0.08)
+    if similarity > 0.72:
+        return min(current, 0.42)
+    if similarity > 0.58:
+        return min(current, 0.58)
+    return current
+
+
 def lock_face_identity(
     base_image: Image.Image | np.ndarray,
     generated_image: Image.Image | np.ndarray,
     face_app=None,
     blend: float = 0.82,
     adaptive_pose: bool = True,
-) -> Image.Image:
-    """
-    Warp/blend the base face only when the generated head orientation is compatible.
+    adaptive_identity: bool = True,
+    return_info: bool = False,
+):
+    """Restore identity conservatively and optionally return diagnostics.
 
-    A strong frontal-face paste onto a profile or over-the-shoulder result usually
-    damages geometry. With adaptive_pose=True the blend is reduced, or skipped,
-    as yaw/pitch diverge.
+    Head-angle compatibility is applied before embedding-based identity pressure,
+    so a low similarity score can never force a frontal face paste onto a profile
+    or over-the-shoulder result.
     """
     base_bgr = _to_bgr(base_image)
     gen_bgr = _to_bgr(generated_image)
+    info = {
+        "identity_similarity_before": None,
+        "identity_similarity_after": None,
+        "requested_blend": float(blend),
+        "effective_blend": 0.0,
+        "applied": False,
+        "reason": "not run",
+    }
 
     if face_app is None:
         try:
@@ -104,27 +163,44 @@ def lock_face_identity(
             face_app.prepare(ctx_id=-1, det_size=(640, 640))
         except Exception as exc:
             print(f"[face_lock] InsightFace unavailable ({exc}); skipping face lock")
-            return _to_pil(gen_bgr)
+            info["reason"] = "InsightFace unavailable"
+            result = _to_pil(gen_bgr)
+            return (result, info) if return_info else result
 
     src_face = _largest_face(face_app.get(base_bgr))
     dst_face = _largest_face(face_app.get(gen_bgr))
     if src_face is None or dst_face is None:
         print("[face_lock] Face not found on base or result; skipping")
-        return _to_pil(gen_bgr)
+        info["reason"] = "face not found"
+        result = _to_pil(gen_bgr)
+        return (result, info) if return_info else result
+
+    similarity = _embedding_similarity(src_face, dst_face)
+    info["identity_similarity_before"] = similarity
 
     effective_blend = _adaptive_face_blend(src_face, dst_face, blend) if adaptive_pose else float(blend)
+    if adaptive_identity:
+        effective_blend = _identity_adjusted_blend(effective_blend, similarity)
+    info["effective_blend"] = float(effective_blend)
+
     if effective_blend <= 0.01:
         print("[face_lock] Head-angle mismatch is too large; skipping 2-D face paste")
-        return _to_pil(gen_bgr)
+        info["reason"] = "head-angle mismatch"
+        result = _to_pil(gen_bgr)
+        return (result, info) if return_info else result
     if effective_blend < blend:
-        print(f"[face_lock] Reduced blend {blend:.2f} -> {effective_blend:.2f} for head-angle compatibility")
+        print(f"[face_lock] Reduced blend {blend:.2f} -> {effective_blend:.2f}")
+    elif effective_blend > blend:
+        print(f"[face_lock] Raised blend {blend:.2f} -> {effective_blend:.2f} for low identity similarity")
 
     src_pts = np.float32(src_face.kps)
     dst_pts = np.float32(dst_face.kps)
     matrix, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.LMEDS)
     if matrix is None:
         print("[face_lock] Could not estimate face warp; skipping")
-        return _to_pil(gen_bgr)
+        info["reason"] = "face warp failed"
+        result = _to_pil(gen_bgr)
+        return (result, info) if return_info else result
 
     warped = cv2.warpAffine(
         base_bgr,
@@ -152,4 +228,8 @@ def lock_face_identity(
                 warped[..., c] = np.clip(warped[..., c].astype(np.float32) * ratio, 0, 255).astype(np.uint8)
 
     out = warped.astype(np.float32) * mask + gen_bgr.astype(np.float32) * (1.0 - mask)
-    return _to_pil(np.clip(out, 0, 255).astype(np.uint8))
+    result = _to_pil(np.clip(out, 0, 255).astype(np.uint8))
+    info["applied"] = True
+    info["reason"] = "applied"
+    info["identity_similarity_after"] = face_identity_similarity(base_image, result, face_app)
+    return (result, info) if return_info else result

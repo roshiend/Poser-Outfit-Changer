@@ -43,7 +43,6 @@ def _run(cmd: list[str]) -> None:
 
 
 def _ensure_vendor_links() -> None:
-    """Restore Leffa's expected top-level links without deleting Detectron2."""
     for name in ("SCHP", "densepose", "detectron2"):
         link = LEFFA_ROOT / name
         target = LEFFA_ROOT / "3rdparty" / name
@@ -65,7 +64,6 @@ def _detectron2_compiled() -> bool:
 
 
 def _ensure_real_densepose_runtime() -> None:
-    """Build Leffa's vendored Detectron2 only when a pose operation needs it."""
     global _densepose_runtime_ready
     if _densepose_runtime_ready and _detectron2_compiled():
         return
@@ -95,7 +93,6 @@ def _ensure_real_densepose_runtime() -> None:
 
 
 def setup_runtime(require_pose: bool = False) -> None:
-    """Clone Leffa/download weights once; prepare real DensePose when pose is requested."""
     global _setup_done, _pipe
 
     if not _setup_done:
@@ -150,7 +147,10 @@ def _debug_gallery(debug: dict):
         ("outfit_densepose", "VTON DensePose"),
         ("after_vton", "After outfit"),
         ("aligned_pose_donor", "Body-aligned pose donor"),
-        ("pose_densepose", "Real pose DensePose IUV"),
+        ("pose_skeleton_before", "Target skeleton before anatomy retarget"),
+        ("pose_skeleton_retargeted", "Skeleton after anatomy retarget"),
+        ("pose_densepose_original", "Original real DensePose IUV"),
+        ("pose_densepose_retargeted", "Anatomy-retargeted DensePose IUV"),
         ("after_pose", "After pose"),
         ("after_face_lock", "Final identity lock"),
     ]
@@ -160,6 +160,35 @@ def _debug_gallery(debug: dict):
         if isinstance(value, Image.Image):
             items.append((value, label))
     return items
+
+
+def _status_text(debug: dict, internal_mode: str, require_pose: bool) -> str:
+    selected = debug.get("selected_vton_model", "n/a")
+    parts = [
+        f"**Completed:** `{internal_mode}`",
+        f"VTON: `{selected}`",
+        f"Pose DensePose: `{'real/required' if require_pose else 'not required'}`",
+    ]
+
+    retarget = debug.get("pose_retarget_diagnostics") or {}
+    if require_pose:
+        if retarget.get("safe_to_retarget"):
+            gap = retarget.get("proportion_gap")
+            gap_text = f"{float(gap):.2f}" if isinstance(gap, (int, float)) else "n/a"
+            parts.append(f"Anatomy retarget: `applied` (gap {gap_text})")
+        else:
+            parts.append(f"Anatomy retarget: `skipped` ({retarget.get('reason', 'n/a')})")
+
+    identity = debug.get("identity_info") or {}
+    before = identity.get("identity_similarity_before")
+    after = identity.get("identity_similarity_after")
+    if isinstance(before, (int, float)):
+        text = f"Identity similarity: `{before:.3f}`"
+        if isinstance(after, (int, float)):
+            text += f" → `{after:.3f}`"
+        parts.append(text)
+
+    return "  •  ".join(parts)
 
 
 @spaces.GPU(duration=300)
@@ -174,6 +203,7 @@ def run_swap(
     seed,
     face_lock,
     preserve_body,
+    pose_retarget_strength,
     progress=gr.Progress(track_tqdm=True),
 ):
     if base is None or ref is None:
@@ -216,6 +246,7 @@ def run_swap(
             face_lock=bool(face_lock),
             ref_kind=ref_kind_map[ref_kind],
             preserve_body=bool(preserve_body),
+            pose_retarget_strength=float(pose_retarget_strength),
             return_debug=True,
         )
     except Exception as exc:
@@ -227,11 +258,7 @@ def run_swap(
     result_path = out / "result.png"
     result.save(result_path)
 
-    selected = debug.get("selected_vton_model", "n/a")
-    status = (
-        f"**Completed:** `{internal_mode}`  •  VTON model: `{selected}`  •  "
-        f"Pose DensePose: `{'real/required' if require_pose else 'not required'}`"
-    )
+    status = _status_text(debug, internal_mode, require_pose)
     progress(1.0, desc="Done")
     return result, compare, str(result_path), _debug_gallery(debug), status
 
@@ -243,8 +270,9 @@ def build_ui() -> gr.Blocks:
             # Poser Outfit Changer
             Keep the **base person's identity/body appearance** and copy clothes and/or pose from a reference person.
 
-            **Accuracy policy:** pose transfer runs only with real Detectron2 DensePose. The app no longer silently
-            changes **Both** into outfit-only, and it no longer stretches the finished person after pose generation.
+            **Fidelity v2:** pose transfer uses real DensePose plus conservative OpenPose anatomy retargeting.
+            The retargeter changes the **pose control**, never stretches the final generated body. Identity lock
+            also reports InsightFace similarity and adapts correction strength while respecting head angle.
             """
         )
         with gr.Row():
@@ -271,13 +299,22 @@ def build_ui() -> gr.Blocks:
         with gr.Accordion("Advanced", open=False):
             gr.Markdown(
                 "VTON model is selected automatically: VITON-HD for upper-body, "
-                "DressCode for lower/full outfit."
+                "DressCode for lower/full outfit. Anatomy retargeting is safety-gated and is skipped "
+                "automatically if too few joints are visible or the required warp would be excessive."
             )
             steps = gr.Slider(20, 50, value=30, step=1, label="Inference steps")
             guidance = gr.Slider(1.0, 5.0, value=2.5, step=0.1, label="Guidance scale")
             seed = gr.Number(value=42, precision=0, label="Seed")
             face_lock = gr.Checkbox(value=True, label="Adaptive face identity lock")
-            preserve_body = gr.Checkbox(value=True, label="Align target pose to base body scale")
+            preserve_body = gr.Checkbox(value=True, label="Preserve base body scale + anatomy")
+            pose_retarget_strength = gr.Slider(
+                0.0,
+                1.0,
+                value=0.65,
+                step=0.05,
+                label="Anatomy retarget strength",
+                info="0 = original target DensePose; 1 = move safe bone lengths as far as allowed toward the base person.",
+            )
 
         btn = gr.Button("Generate", variant="primary")
         status = gr.Markdown()
@@ -305,6 +342,7 @@ def build_ui() -> gr.Blocks:
                 seed,
                 face_lock,
                 preserve_body,
+                pose_retarget_strength,
             ],
             outputs=[result_out, compare_out, file_out, debug_out, status],
         )

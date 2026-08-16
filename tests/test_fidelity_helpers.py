@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 
 from pipeline.body_lock import match_result_body_to_base, soft_preserve_torso
-from pipeline.face_lock import _adaptive_face_blend
+from pipeline.face_lock import _adaptive_face_blend, _identity_adjusted_blend
 from pipeline.leffa_sequential import _resolve_vton_model
 
 
@@ -25,6 +25,13 @@ class FidelityPolicyTests(unittest.TestCase):
         base = _Face([0, 0, 0])
         turned = _Face([0, 62, 0])
         self.assertEqual(_adaptive_face_blend(base, turned, 0.84), 0.0)
+
+    def test_identity_pressure_cannot_override_pose_safety_reduction(self):
+        self.assertEqual(_identity_adjusted_blend(0.32, 0.05), 0.32)
+        self.assertEqual(_identity_adjusted_blend(0.52, 0.05), 0.52)
+
+    def test_identity_pressure_can_strengthen_frontal_low_similarity(self):
+        self.assertGreater(_identity_adjusted_blend(0.82, 0.05), 0.82)
 
     def test_legacy_post_body_warp_is_disabled(self):
         image = Image.new("RGB", (32, 32), "white")

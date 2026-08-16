@@ -25,6 +25,8 @@ jobs:
           pipeline/body_lock.py
           pipeline/face_lock.py
           pipeline/garment_extract.py
+          pipeline/pose_geometry.py
+          pipeline/fidelity_v2.py
           pipeline/leffa_sequential.py
           hf_space/app.py
           push_to_hf_space.py
