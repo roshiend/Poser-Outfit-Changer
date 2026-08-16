@@ -72,6 +72,48 @@ The v2 pipeline exposes `pose_retarget_strength` from `0.0` to `1.0`.
 
 Even at `1.0`, safety checks and per-segment ratio clamps remain active. If the pair is not safe to warp, the original real DensePose control is used and the reason is reported.
 
+## Fidelity benchmark and retarget tuning
+
+`benchmark_fidelity.py` compares the same base/reference pair across multiple retarget strengths instead of tuning from a single image by eye.
+
+The benchmark reports three complementary measurements:
+
+- **Pose angle error (degrees)** — median difference in major arm/leg articulation angles against the reference pose. Lower is better.
+- **Body proportion error** — median multiplicative mismatch between normalized generated and base-person body segments. Lower is better.
+- **Identity similarity** — InsightFace cosine similarity between the base and final generated face. Higher is better.
+
+It also produces a bounded composite score for convenient ranking. The composite score is a tuning aid rather than a scientific identity/quality guarantee; always inspect the saved comparison sheet as well.
+
+Create a manifest like `benchmarks/example_manifest.json`, pointing each case at real local images, then run:
+
+```bash
+python benchmark_fidelity.py benchmarks/my_manifest.json \
+  --strengths 0,0.65,1 \
+  --output benchmark_runs/run1 \
+  --save-debug
+```
+
+If the checkpoints are not present yet, add `--download-checkpoints`. On a suitable Colab runtime where pose has been explicitly enabled, add `--force-pose`.
+
+Each benchmark run writes:
+
+```text
+benchmark_runs/run1/
+├── metrics.csv
+├── metrics.json
+├── recommendations.json
+└── <case-name>/
+    ├── comparison.png
+    ├── result_strength_0.png
+    ├── result_strength_0.65.png
+    ├── result_strength_1.png
+    └── debug_strength_*/       # when --save-debug is used
+```
+
+`recommendations.json` records the best-scoring strength per case and the best mean strength across the benchmark set. Use several representative cases—front → side, over-the-shoulder, seated, crossed arms/legs, dresses, trousers, and noticeably different body builds—before changing the project default.
+
+Generated `benchmark_runs/` data is ignored by Git so multi-GB evaluation outputs are not committed accidentally.
+
 ## Hugging Face Space
 
 The `hf_space/` app:
@@ -104,10 +146,14 @@ You still need working real Detectron2 DensePose. If the GPU/RAM is too small, u
 Poser-Outfit-Changer/
 ├── Pose_Cloth_Changer.ipynb
 ├── README.md
+├── benchmark_fidelity.py
+├── benchmarks/
+│   └── example_manifest.json
 ├── push_to_hf_space.py
 ├── requirements.txt
 ├── pipeline/
 │   ├── __init__.py
+│   ├── benchmark_metrics.py
 │   ├── body_lock.py
 │   ├── densepose_fallback.py
 │   ├── face_lock.py
@@ -122,6 +168,7 @@ Poser-Outfit-Changer/
 │   ├── requirements.txt
 │   └── pipeline/
 └── tests/
+    ├── test_benchmark_metrics.py
     ├── test_fidelity_helpers.py
     └── test_pose_geometry.py
 ```
@@ -136,7 +183,7 @@ Lightweight regression tests run on Python 3.10 and 3.11:
 python -m unittest discover -s tests -v
 ```
 
-They cover VTON model routing, legacy post-body-warp disabling, face pose safety, OpenPose coordinate conversion, anatomy pair safety, preservation of bone direction during retargeting and piecewise-warp identity behavior.
+They cover VTON model routing, legacy post-body-warp disabling, face pose safety, OpenPose coordinate conversion, anatomy pair safety, preservation of bone direction during retargeting, piecewise-warp identity behavior, pose-angle benchmark error, body-proportion benchmark invariance and benchmark score ordering.
 
 These tests do not run the multi-GB diffusion checkpoints. Full perceptual image-quality validation still requires a suitable GPU and representative base/reference image pairs.
 
