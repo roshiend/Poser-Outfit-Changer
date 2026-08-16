@@ -40,6 +40,15 @@ class NotebookSurfaceTests(unittest.TestCase):
         self.assertIn("VERSION", self.code_text)
         self.assertIn("rev-parse", self.code_text)
 
+    def test_bootstrap_guards_numpy_binary_abi(self):
+        self.assertIn("numpy==1.26.4", self.code_text)
+        self.assertIn(".poser_outfit_colab_abi", self.code_text)
+        self.assertIn("import numpy.random", self.code_text)
+        self.assertIn("import torchvision.transforms", self.code_text)
+        self.assertIn("Runtime -> Restart session", self.code_text)
+        self.assertIn("numpy.dtype size changed", self.code_text)
+        self.assertIn("clean subprocess ABI", self.code_text)
+
     def test_notebook_has_no_gradio_web_server_code(self):
         code = self.code_text.lower()
         self.assertNotIn("import gradio", code)
