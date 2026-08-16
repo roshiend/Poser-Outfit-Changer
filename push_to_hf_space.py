@@ -6,8 +6,11 @@ Usage:
   python push_to_hf_space.py
 
 Optional environment:
-  HF_SPACE_ID=roshiend/poser-outfit-changer
+  HF_SPACE_ID=my-account/poser-outfit-changer
   HF_SPACE_HW=a10g-small   # informational; hardware is configured on HF
+
+If HF_SPACE_ID is omitted, deployment uses the authenticated Hugging Face
+username plus the default repo name `poser-outfit-changer`.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ ROOT = Path(__file__).resolve().parent
 SPACE_DIR = ROOT / "hf_space"
 PIPELINE_DIR = ROOT / "pipeline"
 SPACE_PIPELINE_DIR = SPACE_DIR / "pipeline"
-DEFAULT_SPACE = "roshiend/poser-outfit-changer"
+DEFAULT_SPACE_NAME = "poser-outfit-changer"
 
 
 def sync_pipeline() -> None:
@@ -38,6 +41,21 @@ def sync_pipeline() -> None:
     for source in PIPELINE_DIR.glob("*.py"):
         shutil.copy2(source, SPACE_PIPELINE_DIR / source.name)
     print("Synced pipeline/ -> hf_space/pipeline/")
+
+
+def resolve_space_id(username: str, configured: str | None = None) -> str:
+    """Resolve an explicit Space ID or default it to the authenticated HF user."""
+    username = str(username or "").strip()
+    if not username:
+        raise ValueError("Could not determine the authenticated Hugging Face username.")
+
+    value = str(configured or "").strip() or DEFAULT_SPACE_NAME
+    if "/" not in value:
+        value = f"{username}/{value}"
+    owner, name = value.split("/", 1)
+    if not owner or not name or "/" in name:
+        raise ValueError(f"Invalid HF_SPACE_ID: {value!r}; expected 'owner/space-name'.")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,9 +90,7 @@ def main() -> int:
     username = info.get("name") or info.get("fullname", {}).get("name")
     print("Logged in as:", username)
 
-    space_id = os.environ.get("HF_SPACE_ID", DEFAULT_SPACE)
-    if "/" not in space_id:
-        space_id = f"{username}/{space_id}"
+    space_id = resolve_space_id(username, os.environ.get("HF_SPACE_ID"))
 
     api = HfApi(token=token)
     print("Creating/using Space:", space_id)
