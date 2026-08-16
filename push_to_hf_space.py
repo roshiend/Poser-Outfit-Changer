@@ -1,4 +1,4 @@
-"""Synchronize/deploy the canonical pipeline to the Hugging Face Space.
+"""Synchronize/deploy the canonical pipeline to the existing Hugging Face Space.
 
 Usage:
   python push_to_hf_space.py --sync-only
@@ -6,11 +6,11 @@ Usage:
   python push_to_hf_space.py
 
 Optional environment:
-  HF_SPACE_ID=my-account/poser-outfit-changer
+  HF_SPACE_ID=my-account/another-space
   HF_SPACE_HW=a10g-small   # informational; hardware is configured on HF
 
-If HF_SPACE_ID is omitted, deployment uses the authenticated Hugging Face
-username plus the default repo name `poser-outfit-changer`.
+If HF_SPACE_ID is omitted, deployment updates the project's existing Space:
+`rdlmoving/poser-outfit-changer`.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent
 SPACE_DIR = ROOT / "hf_space"
 PIPELINE_DIR = ROOT / "pipeline"
 SPACE_PIPELINE_DIR = SPACE_DIR / "pipeline"
-DEFAULT_SPACE_NAME = "poser-outfit-changer"
+DEFAULT_SPACE_ID = "rdlmoving/poser-outfit-changer"
 
 
 def sync_pipeline() -> None:
@@ -44,14 +44,18 @@ def sync_pipeline() -> None:
 
 
 def resolve_space_id(username: str, configured: str | None = None) -> str:
-    """Resolve an explicit Space ID or default it to the authenticated HF user."""
+    """Resolve an explicit Space ID or default to the project's existing Space."""
     username = str(username or "").strip()
-    if not username:
-        raise ValueError("Could not determine the authenticated Hugging Face username.")
+    value = str(configured or "").strip() or DEFAULT_SPACE_ID
 
-    value = str(configured or "").strip() or DEFAULT_SPACE_NAME
+    # A bare override such as "my-space" still resolves under the authenticated
+    # account. The no-override path is deliberately pinned to the existing
+    # rdlmoving/poser-outfit-changer Space to prevent accidental duplicates.
     if "/" not in value:
+        if not username:
+            raise ValueError("Could not determine the authenticated Hugging Face username.")
         value = f"{username}/{value}"
+
     owner, name = value.split("/", 1)
     if not owner or not name or "/" in name:
         raise ValueError(f"Invalid HF_SPACE_ID: {value!r}; expected 'owner/space-name'.")
