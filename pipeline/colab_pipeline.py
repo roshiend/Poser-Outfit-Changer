@@ -6,7 +6,7 @@ import gc
 import os
 from typing import Literal
 
-from .colab_lowmem import StagedLeffaInference
+from .colab_lowmem import StagedLeffaInference, _release_cuda
 from .fidelity_v2 import FidelityPoseClothPipeline
 from .leffa_sequential import _is_colab
 from .memory import cuda_mem_report, free_vram
@@ -33,22 +33,27 @@ def _resolution_mode() -> str:
     return mode
 
 
+class _FP16StagedLeffaInference(StagedLeffaInference):
+    """Cast mmap-backed modules only when they enter CUDA, not in system RAM."""
+
+    @staticmethod
+    def _to_cuda(module) -> None:
+        import torch
+
+        module.to("cuda", dtype=torch.float16)
+        _release_cuda()
+
+
 class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
     """Use staged component offloading automatically on managed Colab runtimes."""
 
     def __init__(self, *args, **kwargs) -> None:
-        # CUDA allocator configuration is most effective before torch is imported;
-        # the notebook sets this even earlier, but keeping the default here makes
-        # direct Colab imports safer too.
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         super().__init__(*args, **kwargs)
         self.colab_low_memory = bool(_is_colab() and _env_bool("LEFFA_COLAB_LOW_MEMORY", True))
         self.colab_resolution_mode = _resolution_mode()
         self._last_inference_info: dict = {}
 
-        # The old pipeline disabled pose by default on Colab because upstream
-        # Leffa loaded the whole SDXL model onto CUDA. Staged mode removes that
-        # specific VRAM failure mode. An explicit LEFFA_ALLOW_POSE=0 still wins.
         explicit_pose = os.environ.get("LEFFA_ALLOW_POSE", "").strip().lower()
         if self.colab_low_memory and explicit_pose not in {"0", "false", "no", "off"}:
             self.pose_enabled = True
@@ -68,10 +73,9 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
 
         print(f"[colab-lowmem] Memory-mapped model load: {weight_path}")
 
-        # Preferred path: construct parameters on the meta device, memory-map the
-        # checkpoint, then assign checkpoint tensors directly. This avoids the
-        # normal peak where a full random SDXL model and a full loaded state dict
-        # coexist in Colab system RAM.
+        # Preferred path: construct parameters on meta, memory-map the checkpoint,
+        # then assign tensors directly. This avoids a full random SDXL model and a
+        # full loaded state dict existing in system RAM at the same time.
         try:
             from accelerate import init_empty_weights
 
@@ -98,9 +102,6 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
             print(f"[colab-lowmem] Meta + mmap load unavailable; using half-init fallback: {exc!r}")
             gc.collect()
 
-        # Compatibility fallback for torch/accelerate combinations where meta
-        # assignment is unavailable. Building directly in float16 still avoids
-        # the temporary float32 model used by upstream Leffa.
         original_load = torch.load
         original_dtype = torch.get_default_dtype()
 
@@ -156,7 +157,7 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
             str(self.ckpt_dir / "stable-diffusion-inpainting"),
             str(weight),
         )
-        self._vt_inference = StagedLeffaInference(
+        self._vt_inference = _FP16StagedLeffaInference(
             model=model,
             control_type="virtual_tryon",
             resolution_mode=self.colab_resolution_mode,
@@ -178,7 +179,7 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
             str(self.ckpt_dir / "stable-diffusion-xl-1.0-inpainting-0.1"),
             str(self.ckpt_dir / "pose_transfer.pth"),
         )
-        self._pt_inference = StagedLeffaInference(
+        self._pt_inference = _FP16StagedLeffaInference(
             model=model,
             control_type="pose_transfer",
             resolution_mode=self.colab_resolution_mode,
