@@ -2,11 +2,6 @@ name: Deploy Hugging Face Space
 
 on:
   workflow_dispatch:
-    inputs:
-      space_id:
-        description: Optional Hugging Face Space ID (owner/name). Leave blank to update rdlmoving/poser-outfit-changer.
-        required: false
-        type: string
   push:
     branches:
       - main
@@ -28,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_SPACE_ID: ${{ inputs.space_id || vars.HF_SPACE_ID || 'rdlmoving/poser-outfit-changer' }}
+      HF_SPACE_ID: rdlmoving/poser-outfit-changer
 
     steps:
       - name: Checkout
