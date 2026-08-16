@@ -9,20 +9,42 @@ class NotebookSurfaceTests(unittest.TestCase):
         cls.path = Path(__file__).resolve().parents[1] / "Pose_Cloth_Changer.ipynb"
         cls.notebook = json.loads(cls.path.read_text(encoding="utf-8"))
         cls.text = json.dumps(cls.notebook)
+        cls.code_text = "\n".join(
+            "".join(cell.get("source", []))
+            for cell in cls.notebook.get("cells", [])
+            if cell.get("cell_type") == "code"
+        )
 
     def test_notebook_is_valid_v4_json(self):
         self.assertEqual(self.notebook.get("nbformat"), 4)
         self.assertIsInstance(self.notebook.get("cells"), list)
 
-    def test_notebook_imports_canonical_pipeline(self):
-        self.assertIn("from pipeline import PoseClothPipeline", self.text)
-        self.assertNotIn("class FidelityPoseClothPipeline", self.text)
-        self.assertNotIn("def retarget_densepose_control", self.text)
+    def test_notebook_uses_canonical_colab_runner(self):
+        self.assertIn("from colab_runner import prepare_colab", self.code_text)
+        self.assertIn("from colab_runner import run_colab_generation", self.code_text)
+        self.assertNotIn("class FidelityPoseClothPipeline", self.code_text)
+        self.assertNotIn("def retarget_densepose_control", self.code_text)
+
+    def test_notebook_enables_low_memory_policy_before_torch(self):
+        self.assertIn("LEFFA_COLAB_LOW_MEMORY", self.code_text)
+        self.assertIn("PYTORCH_CUDA_ALLOC_CONF", self.code_text)
+        self.assertIn("LEFFA_COLAB_RESOLUTION", self.code_text)
+        self.assertIn("MAX_JOBS", self.code_text)
+
+    def test_notebook_has_no_gradio_web_server_code(self):
+        code = self.code_text.lower()
+        self.assertNotIn("import gradio", code)
+        self.assertNotIn("gr.blocks", code)
+        self.assertNotIn("demo.launch", code)
+        self.assertNotIn("share=true", code.replace(" ", ""))
 
     def test_notebook_exposes_final_fidelity_controls(self):
-        self.assertIn("Auto detect (recommended)", self.text)
-        self.assertIn("pose_retarget_strength", self.text)
-        self.assertIn("run_preflight", self.text)
+        self.assertIn("garment_type='auto'", self.code_text)
+        self.assertIn("pose_retarget_strength=0.65", self.code_text)
+        self.assertIn("mode='both'", self.code_text)
+        # The safe fallback is documented as an optional Markdown code block so
+        # it is not accidentally executed during the normal full-resolution run.
+        self.assertIn("prepare_colab(resolution='safe'", self.text)
 
 
 if __name__ == "__main__":

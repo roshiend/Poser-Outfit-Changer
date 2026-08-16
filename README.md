@@ -4,6 +4,8 @@
 
 Transfer an **outfit and/or pose** from a reference image onto a **base person**, while keeping the base person's identity and body appearance as consistent as the available models allow.
 
+Current release: **1.0.1** — Fidelity v3 plus a notebook-native Google Colab low-memory runtime.
+
 ## Fidelity pipeline
 
 ```text
@@ -41,23 +43,19 @@ The project deliberately separates garment extraction, virtual try-on, pose cont
 - **Garment type can be detected automatically.** `Auto` distinguishes upper-only, lower-only and dress/full-outfit references from SCHP labels, then selects the matching Leffa VTON model.
 - **Outfit transfer is quality-checked before pose diffusion.** Face/hair and background changes are measured while the base pose is still unchanged and large unintended changes are surfaced as warnings.
 - **Pose transfer requires real Detectron2 DensePose.** The parsing-based fallback is allowed only for virtual try-on. It is never used as fake IUV conditioning for pose transfer.
-- **No silent mode downgrade.** Selecting `Both` or `Pose only` either runs pose transfer or returns a clear error explaining what is missing.
+- **No silent mode downgrade.** Selecting `Both` or `Pose only` either runs pose transfer or returns a clear error.
 - **No final-image body stretching.** The completed RGB person is never resized/pasted to force body proportions.
 - **Body preservation happens before pose diffusion.** The reference is uniformly scale-aligned, then the real DensePose IUV control can be anatomy-retargeted.
-- **Anatomy retargeting is safety-gated.** It is skipped when core joints are missing, too few body landmarks are shared, the proportion gap is excessive, or the requested control warp is too large.
+- **Anatomy retargeting is safety-gated.** It is skipped when landmark coverage or required warping is unsafe.
 - **Reference pose directions are preserved.** Bone lengths move conservatively toward the base person's measured anatomy while the reference remains the pose source.
 - **Face lock is head-angle aware.** Strong frontal-face pasting is reduced or skipped for profile/turned heads.
-- **Identity similarity is measured.** InsightFace normalized embeddings are compared before/after face correction and shown in debug/status output when available.
-- **VTON model selection is automatic after garment resolution.** `VITON-HD` is used for upper-body clothing and `DressCode` for lower-body or full-outfit/dress transfer.
+- **Identity similarity is measured.** InsightFace normalized embeddings are compared before/after face correction when available.
+- **VTON routing is automatic after garment resolution.** VITON-HD handles upper-body clothing; DressCode handles lower-body and full-outfit/dress transfer.
 
-## Inputs
+## Inputs and modes
 
 - **Base image** — identity/body appearance to keep.
 - **Reference image** — pose and/or clothes to copy.
-
-Clear, well-lit full-body images generally produce the best results. Extreme occlusion, back-facing heads, unusual crops and very different camera perspectives remain difficult for current diffusion models.
-
-## Modes
 
 | Mode | What happens |
 |---|---|
@@ -65,41 +63,119 @@ Clear, well-lit full-body images generally produce the best results. Extreme occ
 | **Outfit only** | change clothing while keeping the base pose |
 | **Pose only** | transfer the target pose while keeping the base appearance |
 
-For a **clothed-person reference**, `Auto` is the recommended garment setting. For a **flat garment photo**, select `Upper body`, `Lower body`, or `Dress / full outfit` explicitly.
+For a **clothed-person reference**, `garment_type="auto"` is recommended. For a **flat garment photo**, select `upper_body`, `lower_body`, or `dresses` explicitly.
 
 ## Automatic garment routing
 
-`garment_type="auto"` is the default in the fidelity pipeline. The parser evaluates visible upper-clothing, skirt/trouser and dress regions:
+The parser evaluates visible upper-clothing, skirt/trouser and dress regions:
 
 - upper garment only → `upper_body` → VITON-HD;
 - lower garment dominates → `lower_body` → DressCode;
 - dress label or material upper + lower regions → `dresses` / full outfit → DressCode.
 
-The extraction also removes tiny parser islands, softly mattes the garment onto white, and rejects tiny/implausible masks. This is intentionally safer than using the whole reference person when parsing fails.
+The extraction removes tiny parser islands, softly mattes the garment onto white, and rejects tiny/implausible masks rather than using the whole donor person.
 
 ## Anatomy retarget strength
 
-The pipeline exposes `pose_retarget_strength` from `0.0` to `1.0`.
+`pose_retarget_strength` ranges from `0.0` to `1.0`.
 
-- `0.0` — use the original target DensePose unchanged.
+- `0.0` — original target DensePose.
 - `0.65` — default conservative retargeting.
-- `1.0` — move safe measurable bone lengths as far as the configured clamps allow toward the base person's anatomy.
+- `1.0` — move safe measurable bone lengths as far as configured clamps allow toward the base person's anatomy.
 
-Even at `1.0`, safety checks and per-segment ratio clamps remain active. If the pair is not safe to warp, the original real DensePose control is used and the reason is reported.
+Safety checks remain active at every strength.
 
-## Fidelity benchmark and retarget tuning
+## Google Colab low-memory mode
 
-`benchmark_fidelity.py` compares the same base/reference pair across multiple retarget strengths instead of tuning from a single image by eye.
+The one-click notebook is designed for **managed Colab notebooks**, including standard/free-style GPU assignments. Google does not guarantee a specific GPU model, GPU availability, fixed resource quota or fixed usage limit; Colab states that hardware and limits vary dynamically. The notebook therefore measures the assigned GPU at runtime instead of assuming a T4 or a fixed amount of VRAM.
 
-The benchmark reports:
+The free-Colab workflow also stays inside normal notebook cells. It does **not** launch Gradio, `share=True`, a remote desktop or another web UI. This is intentional because Google currently restricts bypassing the notebook UI to interact primarily through a web UI on free managed runtimes.
 
-- **Pose angle error (degrees)** — difference in major arm/leg articulation angles against the reference pose. Lower is better.
-- **Body proportion error** — RMS multiplicative mismatch between normalized generated and base-person body segments, so a locally stretched limb is not hidden by unchanged segments. Lower is better.
-- **Identity similarity** — InsightFace cosine similarity between the base and final generated face. Higher is better. If the target face should be visible but the generated face disappears, identity is penalized; genuinely back-facing targets omit the identity term.
+### What low-memory mode changes
 
-It also produces a bounded composite score for convenient ranking. This is a tuning aid, not a scientific identity/quality guarantee; always inspect the saved comparison sheet.
+On Colab, the public `PoseClothPipeline` automatically becomes `ColabAwareFidelityPipeline` unless `LEFFA_COLAB_LOW_MEMORY=0` is set.
 
-Create a manifest like `benchmarks/example_manifest.json`, then run:
+Instead of upstream Leffa moving the complete model to CUDA at once, the staged path uses:
+
+```text
+CPU / mmap checkpoint
+       │
+       ▼
+VAE encode on CUDA
+       │   VAE back to CPU
+       ▼
+Reference UNet on CUDA
+       │   reference UNet back to CPU
+       ▼
+Generative UNet on CUDA
+       │   generative UNet back to CPU
+       ▼
+VAE decode on CUDA
+```
+
+Additional safeguards:
+
+- preferred **meta-device + memory-mapped checkpoint loading** to reduce system-RAM peaks;
+- float16 initialization fallback where meta/mmap assignment is unavailable;
+- heavyweight modules are cast to **FP16 when moved to CUDA**;
+- VAE slicing/tiling enabled when supported;
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce allocator fragmentation;
+- Detectron2 build uses `MAX_JOBS=2` to reduce compile-time RAM pressure;
+- real Detectron2 DensePose remains mandatory for pose transfer.
+
+### Automatic VRAM policy
+
+The default `LEFFA_COLAB_RESOLUTION=auto` uses measured GPU VRAM:
+
+| Measured VRAM | Diffusion size | SDXL pose CFG |
+|---|---:|---|
+| **>= 20 GB** | 768×1024 when >=14 GB rule is also met | retained |
+| **14–<20 GB** | 768×1024 | disabled to avoid batch doubling |
+| **11–<14 GB** | 672×896 | disabled |
+| **<11 GB** | 576×768 | disabled |
+
+For unusually constrained runtimes, force the safe profile **before creating the pipeline**:
+
+```python
+import os
+os.environ["LEFFA_COLAB_RESOLUTION"] = "safe"
+```
+
+The safe profile runs diffusion at 576×768 and returns the generated result on the canonical 768×1024 canvas. DensePose uses nearest-neighbour control resizing; it is not replaced by the approximate VTON fallback.
+
+### Run the Colab notebook
+
+1. Open the badge at the top of this README.
+2. Choose **Runtime → Change runtime type → GPU**.
+3. Run the cells in order.
+4. The notebook reports the actual GPU, VRAM and system RAM.
+5. Upload the base image, then the reference image.
+6. Run the Generate cell. Defaults: `both`, automatic garment routing, 25 steps and retarget strength `0.65`.
+7. The notebook prints peak allocated CUDA memory and stage-specific memory policy details.
+
+If CUDA still reports OOM, restart the runtime to clear fragmentation and use the notebook's `safe` recovery cell. Colab resource availability itself cannot be guaranteed by this repository.
+
+## Runtime preflight
+
+Before a local/Colab GPU run:
+
+```bash
+python -m pipeline.preflight
+python -m pipeline.preflight --require-pose --require-gpu --require-checkpoints
+```
+
+The preflight reports Python compatibility, Leffa source presence, checkpoint files, core modules, InsightFace availability, compiled Detectron2/DensePose and CUDA status. `--json` is available for automation.
+
+## Fidelity benchmark
+
+`benchmark_fidelity.py` compares the same base/reference pair across retarget strengths and reports:
+
+- pose angle error;
+- normalized body-proportion error;
+- InsightFace identity similarity;
+- a bounded composite tuning score.
+
+Example:
 
 ```bash
 python benchmark_fidelity.py benchmarks/my_manifest.json \
@@ -108,88 +184,63 @@ python benchmark_fidelity.py benchmarks/my_manifest.json \
   --save-debug
 ```
 
-If checkpoints are not present yet, add `--download-checkpoints`. On a suitable Colab runtime where pose has been explicitly enabled, add `--force-pose`.
-
-Each run writes CSV/JSON metrics, `recommendations.json`, per-strength images, a comparison sheet and optional pipeline debug images. `benchmark_runs/` is ignored by Git.
-
-## Runtime preflight
-
-Before a local/Colab GPU run, inspect the environment instead of discovering missing components halfway through generation:
-
-```bash
-python -m pipeline.preflight
-python -m pipeline.preflight --require-pose --require-gpu --require-checkpoints
-```
-
-The preflight reports Python compatibility, Leffa source presence, required checkpoint files, core Python modules, InsightFace availability, compiled Detectron2/DensePose and CUDA status. `--json` is available for automation.
+Generated `benchmark_runs/` data is ignored by Git.
 
 ## Hugging Face Space
 
-The `hf_space/` app:
+The `hf_space/` app keeps the full Fidelity v3 UI and automatically uses the normal non-Colab inference path. The Colab-aware public wrapper detects that Hugging Face Space is not a managed Colab runtime, so the new low-memory behavior does not silently change Space inference.
 
-1. defaults clothed-person references to **Auto detect (recommended)**;
-2. refuses unreliable garment extraction rather than leaking the donor person into VTON;
-3. reports garment resolution/confidence and outfit fidelity warnings;
-4. checks for compiled Detectron2 `_C` when pose is requested;
-5. attempts to build Leffa's vendored Detectron2 package when needed;
-6. stops pose generation if real DensePose cannot load;
-7. exposes anatomy retarget strength and detailed pipeline debug views;
-8. reports whether retargeting was applied/skipped and InsightFace identity similarity when available.
+The Space:
 
-Pose transfer uses Leffa's heavier SDXL checkpoint, so use a GPU with enough memory for the full pipeline.
+1. defaults clothed-person references to Auto detect;
+2. refuses unreliable garment extraction;
+3. reports garment confidence and outfit fidelity warnings;
+4. requires real Detectron2 DensePose for pose;
+5. exposes anatomy retarget strength and detailed debug views;
+6. reports identity similarity when available.
 
 ### Deployment synchronization
 
-`pipeline/` is the single canonical implementation. Before any Space upload, synchronize it into the deployable package:
+`pipeline/` is the canonical source. Synchronize before deploying:
 
 ```bash
 python push_to_hf_space.py --sync-only
 ```
 
-The normal deployment command performs this synchronization automatically:
+Normal deployment performs synchronization automatically:
 
 ```bash
 set HF_TOKEN=hf_...
 python push_to_hf_space.py
 ```
 
-With no `HF_SPACE_ID`, the script uses the **authenticated Hugging Face username** and deploys to `<authenticated-user>/poser-outfit-changer`. To target a different organization/account or Space name, set an explicit ID first:
+Without `HF_SPACE_ID`, deployment targets `<authenticated-user>/poser-outfit-changer`. To target another owner/name:
 
 ```bash
 set HF_SPACE_ID=my-org/my-space
 python push_to_hf_space.py
 ```
 
-CI also runs sync-only and fails if `hf_space/pipeline/` would change, preventing the Space copy from drifting away from the canonical source.
-
-## Google Colab
-
-The one-click notebook imports the canonical repository `pipeline/` instead of embedding a second implementation.
-
-Free Colab remains memory-constrained because Leffa pose transfer uses an SDXL-based checkpoint. Pose is disabled by default in a normal Colab runtime. To force pose on a suitable runtime, set this **before** creating `PoseClothPipeline`:
-
-```python
-import os
-os.environ["LEFFA_ALLOW_POSE"] = "1"
-```
-
-You still need working real Detectron2 DensePose. If GPU/RAM is too small, use `Outfit only` or a larger runtime rather than accepting an inaccurate pose fallback.
+CI fails if `hf_space/pipeline/` drifts from the canonical source.
 
 ## Project layout
 
 ```text
 Poser-Outfit-Changer/
 ├── Pose_Cloth_Changer.ipynb
-├── README.md
+├── colab_runner.py
 ├── benchmark_fidelity.py
-├── benchmarks/
-│   └── example_manifest.json
+├── README.md
+├── CHANGELOG.md
+├── VERSION
 ├── push_to_hf_space.py
 ├── requirements.txt
 ├── pipeline/
 │   ├── __init__.py
 │   ├── benchmark_metrics.py
 │   ├── body_lock.py
+│   ├── colab_lowmem.py
+│   ├── colab_pipeline.py
 │   ├── densepose_fallback.py
 │   ├── face_lock.py
 │   ├── fidelity_v2.py
@@ -203,11 +254,13 @@ Poser-Outfit-Changer/
 │   ├── app.py
 │   ├── README.md
 │   ├── requirements.txt
-│   └── pipeline/              # synchronized canonical copy
+│   └── pipeline/              # exact synchronized copy
 └── tests/
     ├── test_benchmark_metrics.py
+    ├── test_colab_lowmem.py
     ├── test_fidelity_helpers.py
     ├── test_garment_fidelity.py
+    ├── test_notebook_surface.py
     ├── test_pose_geometry.py
     └── test_preflight.py
 ```
@@ -220,9 +273,9 @@ Lightweight regression tests run on Python 3.10 and 3.11:
 python -m unittest discover -s tests -v
 ```
 
-CI synchronizes the deployable Space pipeline, verifies there is no drift, compiles both root and Space modules, and runs the full lightweight suite. Coverage includes VTON routing, garment auto-detection/extraction failure policy, outfit preservation diagnostics, legacy body-warp disabling, face pose safety, OpenPose conversion, anatomy retarget safety/direction, piecewise control warping, benchmark metrics/ranking and runtime preflight requirements.
+CI synchronizes the deployable Space pipeline, verifies no drift, compiles the canonical pipeline, Space pipeline and Colab runner, then runs the suite. Coverage includes garment routing/extraction, pose/body/identity policy, anatomy retargeting, benchmark metrics, preflight, Colab VRAM policy and the notebook's no-web-server surface.
 
-These tests do **not** run the multi-GB diffusion checkpoints. Full perceptual image-quality validation still requires a suitable GPU and representative base/reference image pairs.
+**Validation boundary:** CI does not download or execute the multi-GB Leffa diffusion checkpoints. Actual Colab peak memory and perceptual quality must still be verified on a managed Colab GPU because Google's assigned resources vary dynamically.
 
 ## Requirements
 
@@ -233,11 +286,11 @@ These tests do **not** run the multi-GB diffusion checkpoints. Full perceptual i
 - SCHP/OpenPose preprocessing
 - Detectron2 + DensePose for pose modes
 - InsightFace for identity diagnostics/correction
-- Gradio for the app
+- Gradio only for the Hugging Face app; the free-Colab notebook does not use it as its interaction surface
 
 ## Limits
 
-No diffusion pipeline can guarantee literal pixel-perfect identity or body geometry from a single image. Fidelity v3 is designed to eliminate known fidelity-destroying shortcuts, make safety fallbacks explicit, and change generation controls rather than stretching/repairing the finished image afterward. Results still vary with pose extremity, clothing occlusion, face visibility, source resolution and model training distribution.
+No diffusion pipeline can guarantee literal pixel-perfect identity or body geometry from a single image. Fidelity v3 is designed to eliminate known fidelity-destroying shortcuts and keep fallbacks explicit. The Colab low-memory mode additionally trades some compute configuration for memory safety; in particular, SDXL pose on sub-20-GB GPUs avoids classifier-free-guidance batch doubling. Results can therefore differ from large-GPU inference.
 
 The upstream Leffa try-on/pose models are trained on academic fashion/person datasets. Check Leffa, Detectron2, InsightFace and checkpoint licenses before commercial deployment.
 
