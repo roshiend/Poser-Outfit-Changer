@@ -1,14 +1,14 @@
 # Pose & Outfit Changer — Fidelity v3
 
-[![Open Latest Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)
+[![Open Token-enabled Latest Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb)
 
-**Latest Colab notebook:** https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb
+**Token-enabled latest Colab notebook:** https://colab.research.google.com/github/roshiend/Poser-Outfit-Changer/blob/main/Pose_Cloth_Changer.ipynb
 
-The notebook always fetches/resets the project to the latest `main`, clears cached project modules, reloads `colab_runner`, and prints the repository version + commit before setup so an older Colab kernel cannot silently keep running stale bootstrap code.
+The notebook always fetches/resets the project to the latest `main`, clears cached project modules, reloads `colab_runner`, and prints the repository version + commit before setup so an older Colab kernel cannot silently keep running stale bootstrap code. It also includes a dedicated secure Hugging Face authentication cell before checkpoint/model preparation: it can read a Colab Secret named `HF_TOKEN` or prompt for the token with hidden input, then validates it before downloads.
 
 Transfer an **outfit and/or pose** from a reference image onto a **base person**, while keeping the base person's identity and body appearance as consistent as the available models allow.
 
-Current release: **1.0.3** — Fidelity v3 plus the notebook-native Google Colab low-memory runtime, corrected DensePose/Detectron2 bootstrap, and forced fresh-module reload after repository updates.
+Current release: **1.0.4** — Fidelity v3 plus the notebook-native Google Colab low-memory runtime, corrected DensePose/Detectron2 bootstrap, NumPy ABI restart guard, forced fresh-module reload after repository updates, and secure Hugging Face token authentication before model downloads.
 
 ## Fidelity pipeline
 
@@ -148,16 +148,21 @@ os.environ["LEFFA_COLAB_RESOLUTION"] = "safe"
 
 The safe profile runs diffusion at 576×768 and returns the generated result on the canonical 768×1024 canvas. DensePose uses nearest-neighbour control resizing; it is not replaced by the approximate VTON fallback.
 
+### Hugging Face token authentication
+
+Before Leffa/checkpoint preparation, the notebook has a dedicated **Hugging Face access token** cell. It first looks for a Colab Secret named `HF_TOKEN`; if one is not available, it asks you to paste the token using hidden input. The token is validated with Hugging Face before model downloads and is never printed by the notebook.
+
 ### Run the Colab notebook
 
-1. Open the **Open Latest Colab** badge at the top of this README, or use the plain latest-notebook link directly below it.
+1. Open the **Open Token-enabled Latest Colab** badge at the top of this README, or use the plain latest-notebook link directly below it.
 2. Choose **Runtime → Change runtime type → GPU**.
-3. Run the cells in order.
-4. Confirm Cell 1 prints the current repository `VERSION` and short Git commit before continuing.
-5. The notebook reports the actual GPU, VRAM and system RAM.
-6. Upload the base image, then the reference image.
-7. Run the Generate cell. Defaults: `both`, automatic garment routing, 25 steps and retarget strength `0.65`.
-8. The notebook prints peak allocated CUDA memory and stage-specific memory policy details.
+3. Run Cell 1. If it asks for **Runtime → Restart session** after dependency/NumPy setup, restart once and rerun Cell 1 before continuing.
+4. Confirm Cell 1 prints `Runtime ABI ready`, the current repository `VERSION`, and short Git commit.
+5. Run the **Hugging Face access token** cell. Use the Colab Secret `HF_TOKEN` or paste the token into the hidden prompt; continue only after authentication succeeds.
+6. Run the Leffa/DensePose preparation cell. The notebook reports the actual GPU, VRAM and system RAM and downloads required checkpoints.
+7. Upload the base image, then the reference image.
+8. Run the Generate cell. Defaults: `both`, automatic garment routing, 25 steps and retarget strength `0.65`.
+9. The notebook prints peak allocated CUDA memory and stage-specific memory policy details, then use the final cell to download the result.
 
 If CUDA still reports OOM, restart the runtime to clear fragmentation and use the notebook's `safe` recovery cell. Colab resource availability itself cannot be guaranteed by this repository.
 
@@ -279,7 +284,7 @@ Lightweight regression tests run on Python 3.10 and 3.11:
 python -m unittest discover -s tests -v
 ```
 
-CI synchronizes the deployable Space pipeline, verifies no drift, compiles the canonical pipeline, Space pipeline and Colab runner, then runs the suite. Coverage includes garment routing/extraction, pose/body/identity policy, anatomy retargeting, benchmark metrics, preflight, Colab VRAM policy and the notebook's no-web-server surface.
+CI synchronizes the deployable Space pipeline, verifies no drift, compiles the canonical pipeline, Space pipeline and Colab runner, then runs the suite. Coverage includes garment routing/extraction, pose/body/identity policy, anatomy retargeting, benchmark metrics, preflight, Colab VRAM policy, NumPy ABI bootstrap, secure Hugging Face authentication ordering and the notebook's no-web-server surface.
 
 **Validation boundary:** CI does not download or execute the multi-GB Leffa diffusion checkpoints. Actual Colab peak memory and perceptual quality must still be verified on a managed Colab GPU because Google's assigned resources vary dynamically.
 
@@ -288,6 +293,7 @@ CI synchronizes the deployable Space pipeline, verifies no drift, compiles the c
 - Python 3.10+
 - NVIDIA GPU for Leffa inference
 - PyTorch / torchvision
+- Hugging Face access token for Hub-hosted/gated model assets used by the Colab workflow
 - Leffa checkpoints
 - SCHP/OpenPose preprocessing
 - Detectron2 + DensePose for pose modes
