@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "name": "front_to_profile",
+      "base": "images/base_front.png",
+      "reference": "images/reference_profile.png",
+      "mode": "both",
+      "garment_type": "dresses",
+      "ref_kind": "clothed_person",
+      "seed": 42
+    },
+    {
+      "name": "front_to_over_shoulder",
+      "base": "images/base_front.png",
+      "reference": "images/reference_over_shoulder.png",
+      "mode": "pose_only",
+      "garment_type": "upper_body",
+      "ref_kind": "clothed_person",
+      "seed": 42
+    }
+  ]
+}
