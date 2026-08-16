@@ -1,4 +1,4 @@
-"""Pose & outfit transfer helpers for Hugging Face Spaces."""
+"""Pose & outfit transfer helpers for Colab, local and Hugging Face use."""
 
 from .body_lock import (
     align_pose_donor_to_base_body,
