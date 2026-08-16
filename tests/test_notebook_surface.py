@@ -20,7 +20,7 @@ class NotebookSurfaceTests(unittest.TestCase):
         self.assertIsInstance(self.notebook.get("cells"), list)
 
     def test_notebook_uses_canonical_colab_runner(self):
-        self.assertIn("from colab_runner import prepare_colab", self.code_text)
+        self.assertIn("colab_runner.prepare_colab", self.code_text)
         self.assertIn("from colab_runner import run_colab_generation", self.code_text)
         self.assertNotIn("class FidelityPoseClothPipeline", self.code_text)
         self.assertNotIn("def retarget_densepose_control", self.code_text)
@@ -29,7 +29,16 @@ class NotebookSurfaceTests(unittest.TestCase):
         self.assertIn("LEFFA_COLAB_LOW_MEMORY", self.code_text)
         self.assertIn("PYTORCH_CUDA_ALLOC_CONF", self.code_text)
         self.assertIn("LEFFA_COLAB_RESOLUTION", self.code_text)
-        self.assertIn("MAX_JOBS", self.code_text)
+        self.assertIn("os.environ['MAX_JOBS'] = '1'", self.code_text)
+
+    def test_bootstrap_forces_fresh_project_modules(self):
+        self.assertIn("sys.modules.pop(name, None)", self.code_text)
+        self.assertIn("name == 'colab_runner'", self.code_text)
+        self.assertIn("name.startswith('pipeline.')", self.code_text)
+        self.assertIn("importlib.invalidate_caches()", self.code_text)
+        self.assertIn("importlib.reload(colab_runner)", self.code_text)
+        self.assertIn("VERSION", self.code_text)
+        self.assertIn("rev-parse", self.code_text)
 
     def test_notebook_has_no_gradio_web_server_code(self):
         code = self.code_text.lower()
@@ -42,8 +51,6 @@ class NotebookSurfaceTests(unittest.TestCase):
         self.assertIn("garment_type='auto'", self.code_text)
         self.assertIn("pose_retarget_strength=0.65", self.code_text)
         self.assertIn("mode='both'", self.code_text)
-        # The safe fallback is documented as an optional Markdown code block so
-        # it is not accidentally executed during the normal full-resolution run.
         self.assertIn("prepare_colab(resolution='safe'", self.text)
 
 
