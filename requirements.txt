@@ -1,27 +1,41 @@
-# Reference deps for local / Colab notes.
-# On Colab, the notebook installs packages directly (torch is preinstalled).
+# Local / Colab dependencies aligned with Leffa plus this project's fidelity tools.
+# PyTorch/torchvision/torchaudio are intentionally NOT pinned here: install a CUDA-compatible
+# PyTorch build for the target GPU first (Colab already provides one), then install this file.
 
 accelerate
+av
 cloudpickle
+config
 diffusers
 einops
 fvcore
-gradio
+gradio==5.49.1
+gradio-client
 huggingface_hub
 imageio
 insightface
+iopath
+cloudpathlib
+portalocker
+ninja
 matplotlib
-numpy<2
+numpy>=1.26.4,<2
 omegaconf
 onnx
 onnxruntime-gpu
 opencv-python-headless
+pandas>=2.0,<2.3
 peft
+pillow
+psutil
 pycocotools
-regex
+pyyaml
+regex==2024.5.15
 safetensors
 scikit-image
 scipy
 timm
+tokenizers
+torchmetrics
+tqdm
 transformers
-av
