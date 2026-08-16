@@ -1,11 +1,11 @@
-"""Extract clothing from a clothed-person photo onto a white background for VTON."""
+"""Extract clothing from a clothed-person photo for Leffa VTON."""
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 from PIL import Image
 
-# SCHP / ATR-style labels used by Leffa Parsing
 LABEL = {
     "upper_clothes": 4,
     "skirt": 5,
@@ -16,14 +16,25 @@ LABEL = {
 }
 
 GARMENT_LABELS = {
-    "upper_body": (4, 7, 8, 17),  # tops + dress + belt/scarf accents
-    "lower_body": (5, 6, 8),  # skirt / pants / belt
-    "dresses": (4, 5, 6, 7, 8, 17),  # full outfit from a clothed person
+    "upper_body": (4, 7, 8, 17),
+    "lower_body": (5, 6, 8),
+    "dresses": (4, 5, 6, 7, 8, 17),
 }
 
 
 def garment_labels_for(garment_type: str) -> tuple[int, ...]:
     return GARMENT_LABELS.get(garment_type, GARMENT_LABELS["upper_body"])
+
+
+def _soft_mask(mask: np.ndarray, feather_px: int = 5) -> np.ndarray:
+    hard = mask.astype(np.uint8) * 255
+    kernel = np.ones((3, 3), np.uint8)
+    hard = cv2.morphologyEx(hard, cv2.MORPH_CLOSE, kernel, iterations=1)
+    hard = cv2.morphologyEx(hard, cv2.MORPH_OPEN, kernel, iterations=1)
+    if feather_px > 0:
+        sigma = max(0.8, feather_px / 2.0)
+        hard = cv2.GaussianBlur(hard, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    return hard.astype(np.float32) / 255.0
 
 
 def extract_garment_from_person(
@@ -33,12 +44,7 @@ def extract_garment_from_person(
     out_size: tuple[int, int] = (768, 1024),
     pad_ratio: float = 0.08,
 ) -> Image.Image:
-    """
-    Build a garment reference image from a person who is already wearing clothes.
-
-    Uses human-parsing labels to keep only clothing pixels on a white canvas —
-    the format Leffa VTON expects better than a full person photo.
-    """
+    """Create a clean, softly matted garment reference on white."""
     person = person_rgb.convert("RGB").resize(out_size, Image.BICUBIC)
     parse = parse_map if isinstance(parse_map, Image.Image) else Image.fromarray(np.asarray(parse_map))
     parse = parse.resize(out_size, Image.NEAREST)
@@ -50,10 +56,9 @@ def extract_garment_from_person(
 
     keep = np.isin(labels, garment_labels_for(garment_type))
     if not np.any(keep):
-        # Fallback: try full clothing set if the chosen region was empty
         keep = np.isin(labels, GARMENT_LABELS["dresses"])
     if not np.any(keep):
-        print("[garment] No clothing labels found; using full person image as VTON ref.")
+        print("[garment] No clothing labels found; using full person image as VTON ref")
         return person
 
     ys, xs = np.where(keep)
@@ -66,16 +71,19 @@ def extract_garment_from_person(
     y1, x1 = min(h, y1 + pad_y), min(w, x1 + pad_x)
 
     crop = arr[y0:y1, x0:x1].copy()
-    crop_mask = keep[y0:y1, x0:x1]
-    crop[~crop_mask] = 255
+    alpha = _soft_mask(keep[y0:y1, x0:x1], feather_px=5)[..., None]
+    white = np.full_like(crop, 255)
+    matted = np.clip(
+        crop.astype(np.float32) * alpha + white.astype(np.float32) * (1.0 - alpha),
+        0,
+        255,
+    ).astype(np.uint8)
 
-    # Center garment crop on white 768x1024 canvas
     canvas = np.ones((h, w, 3), dtype=np.uint8) * 255
-    ch, cw = crop.shape[:2]
-    # Fit inside canvas with margin
-    scale = min((w * 0.92) / max(cw, 1), (h * 0.85) / max(ch, 1), 1.0)
-    new_w, new_h = max(1, int(cw * scale)), max(1, int(ch * scale))
-    crop_img = Image.fromarray(crop).resize((new_w, new_h), Image.LANCZOS)
+    ch, cw = matted.shape[:2]
+    scale = min((w * 0.92) / max(cw, 1), (h * 0.88) / max(ch, 1), 1.0)
+    new_w, new_h = max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))
+    crop_img = Image.fromarray(matted).resize((new_w, new_h), Image.LANCZOS)
     paste_x = (w - new_w) // 2
     paste_y = (h - new_h) // 2
     canvas[paste_y : paste_y + new_h, paste_x : paste_x + new_w] = np.asarray(crop_img)
