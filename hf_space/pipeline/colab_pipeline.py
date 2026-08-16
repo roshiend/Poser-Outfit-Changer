@@ -33,6 +33,15 @@ def _resolution_mode() -> str:
     return mode
 
 
+def _drop_failed_load_objects(model, state):
+    """Drop partial meta/mmap objects before allocating a fallback model."""
+    model = None
+    state = None
+    gc.collect()
+    free_vram()
+    return model, state
+
+
 class _FP16StagedLeffaInference(StagedLeffaInference):
     """Cast mmap-backed modules only when they enter CUDA, not in system RAM."""
 
@@ -103,10 +112,7 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
             return model
         except Exception as exc:
             print(f"[colab-lowmem] Meta + mmap load unavailable; using half-init fallback: {exc!r}")
-            state = None
-            model = None
-            gc.collect()
-            free_vram()
+            model, state = _drop_failed_load_objects(model, state)
 
         original_load = torch.load
         original_dtype = torch.get_default_dtype()
