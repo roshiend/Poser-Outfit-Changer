@@ -153,6 +153,13 @@ set HF_TOKEN=hf_...
 python push_to_hf_space.py
 ```
 
+With no `HF_SPACE_ID`, the script uses the **authenticated Hugging Face username** and deploys to `<authenticated-user>/poser-outfit-changer`. To target a different organization/account or Space name, set an explicit ID first:
+
+```bash
+set HF_SPACE_ID=my-org/my-space
+python push_to_hf_space.py
+```
+
 CI also runs sync-only and fails if `hf_space/pipeline/` would change, preventing the Space copy from drifting away from the canonical source.
 
 ## Google Colab
