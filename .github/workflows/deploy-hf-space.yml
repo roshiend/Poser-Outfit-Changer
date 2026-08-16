@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       space_id:
-        description: Optional Hugging Face Space ID (owner/name). Leave blank to use HF_SPACE_ID repo variable or the authenticated user's poser-outfit-changer Space.
+        description: Optional Hugging Face Space ID (owner/name). Leave blank to update rdlmoving/poser-outfit-changer.
         required: false
         type: string
   push:
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HF_SPACE_ID: ${{ inputs.space_id || vars.HF_SPACE_ID }}
+      HF_SPACE_ID: ${{ inputs.space_id || vars.HF_SPACE_ID || 'rdlmoving/poser-outfit-changer' }}
 
     steps:
       - name: Checkout
@@ -68,10 +68,4 @@ jobs:
 
       - name: Deployment target
         if: steps.auth.outputs.ready == 'true'
-        shell: bash
-        run: |
-          if [ -n "$HF_SPACE_ID" ]; then
-            echo "Published target: https://huggingface.co/spaces/$HF_SPACE_ID"
-          else
-            echo "Published to the authenticated Hugging Face user's poser-outfit-changer Space."
-          fi
+        run: echo "Published target: https://huggingface.co/spaces/$HF_SPACE_ID"
