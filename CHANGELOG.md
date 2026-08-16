@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.4 — 2026-08-16
+
+### Google Colab NumPy ABI fix
+
+- Pin NumPy exactly to `1.26.4` for the Colab/runtime dependency set.
+- Add a two-phase Cell 1 bootstrap keyed by Python version and the current requirements hash.
+- After dependency replacement, stop with a clear `Runtime -> Restart session` instruction before any model/preprocessor imports occur.
+- Verify `numpy.random` and `torchvision.transforms` in a clean subprocess before marking the dependency ABI ready.
+- On the post-restart Cell 1 run, verify the current kernel imports the same ABI cleanly and fail early with a targeted message if `numpy.dtype size changed` or another binary incompatibility is still present.
+- Preserve the existing latest-main refresh, stale project-module eviction, one-worker Detectron2 build policy, and low-memory T4 inference path.
+- Add notebook regression coverage for the NumPy ABI marker, restart gate, clean subprocess check, and exact NumPy pin.
+
 ## 1.0.3 — 2026-08-16
 
 ### Google Colab stale-module refresh fix
