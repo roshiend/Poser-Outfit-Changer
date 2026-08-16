@@ -73,9 +73,6 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
 
         print(f"[colab-lowmem] Memory-mapped model load: {weight_path}")
 
-        # Preferred path: construct parameters on meta, memory-map the checkpoint,
-        # then assign tensors directly. This avoids a full random SDXL model and a
-        # full loaded state dict existing in system RAM at the same time.
         try:
             from accelerate import init_empty_weights
 
@@ -202,4 +199,6 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
         self._last_inference_info = info
         if info:
             debug["colab_memory"] = info
+            if control_type in {"virtual_tryon", "pose_transfer"}:
+                debug[f"{control_type}_memory"] = info
         return generated, mask, densepose, debug
