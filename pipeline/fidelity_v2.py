@@ -1,4 +1,4 @@
-"""Second-generation fidelity pipeline: anatomy-aware pose control + identity diagnostics."""
+"""Fidelity pipeline: garment intelligence, anatomy-aware pose and identity diagnostics."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from PIL import Image
 
 from .body_lock import align_pose_donor_to_base_body, person_bbox_from_parse
 from .face_lock import lock_face_identity
-from .garment_extract import extract_garment_from_person
+from .garment_extract import GarmentAnalysis, extract_garment_from_person
 from .leffa_sequential import (
     DensePoseUnavailableError,
     Mode,
@@ -21,32 +21,35 @@ from .leffa_sequential import (
     _resolve_vton_model,
 )
 from .memory import free_vram
+from .outfit_quality import assess_outfit_preservation
 from .pose_geometry import draw_skeleton, openpose_points, retarget_densepose_control
 
 
 class FidelityPoseClothPipeline(BasePoseClothPipeline):
-    """Leffa pipeline with conservative skeleton retargeting before pose diffusion."""
+    """Leffa pipeline with guarded garment extraction and pose-control retargeting."""
 
     def _garment_ref_from_clothed_person(
         self,
         person: Image.Image,
         garment_type: str,
-    ) -> Image.Image:
-        # Keep this override only to ensure subclasses remain independent of future
-        # base-pipeline garment behavior changes.
+    ) -> tuple[Image.Image, GarmentAnalysis]:
         from leffa_utils.utils import resize_and_center
 
         self._load_preprocessors(require_real_densepose=False)
         person = resize_and_center(person.convert("RGB"), 768, 1024)
         parse_map, _ = self._parsing(person.resize((384, 512)))
-        garment = extract_garment_from_person(
+        garment, analysis = extract_garment_from_person(
             person_rgb=person,
             parse_map=parse_map,
             garment_type=garment_type,
             out_size=(768, 1024),
+            return_analysis=True,
         )
-        print(f"[garment] Extracted {garment_type} clothing from clothed-person ref")
-        return garment
+        print(
+            "[garment] Extracted "
+            f"{analysis.resolved_type} clothing (requested={garment_type}, confidence={analysis.confidence:.2f})"
+        )
+        return garment, analysis
 
     def _run_control_v2(
         self,
@@ -155,7 +158,7 @@ class FidelityPoseClothPipeline(BasePoseClothPipeline):
         base_image: PathLike,
         ref_image: PathLike,
         mode: Mode = "both",
-        garment_type: str = "upper_body",
+        garment_type: str = "auto",
         vt_model_type: VtonModel = "auto",
         steps: int = 30,
         guidance_scale: float = 2.5,
@@ -171,8 +174,10 @@ class FidelityPoseClothPipeline(BasePoseClothPipeline):
 
         if mode not in {"both", "outfit_only", "pose_only"}:
             raise ValueError(f"Unknown mode: {mode}")
-        if garment_type not in {"upper_body", "lower_body", "dresses"}:
+        if garment_type not in {"auto", "upper_body", "lower_body", "dresses"}:
             raise ValueError(f"Unknown garment type: {garment_type}")
+        if mode in {"both", "outfit_only"} and garment_type == "auto" and (ref_kind or self.default_ref_kind) == "flat_garment":
+            raise ValueError("Auto garment detection requires a clothed-person reference; choose upper/lower/full for flat garment photos.")
         if mode in {"both", "pose_only"} and not self.pose_enabled:
             raise RuntimeError(
                 "Pose transfer is disabled on this Colab runtime because the SDXL pose model often "
@@ -185,9 +190,10 @@ class FidelityPoseClothPipeline(BasePoseClothPipeline):
         kind = ref_kind or self.default_ref_kind
         do_face = self.enable_face_lock if face_lock is None else face_lock
         do_body = self.preserve_body if preserve_body is None else preserve_body
-        selected_vton = _resolve_vton_model(garment_type, vt_model_type)
+        resolved_garment_type = garment_type
+        selected_vton = None
         debug: dict = {
-            "selected_vton_model": selected_vton,
+            "requested_garment_type": garment_type,
             "pose_retarget_strength": float(np.clip(pose_retarget_strength, 0.0, 1.0)),
         }
 
@@ -197,19 +203,38 @@ class FidelityPoseClothPipeline(BasePoseClothPipeline):
         current = base
         base_bbox = None
         base_keypoints = None
+        base_parse_for_quality = None
         if do_body and mode in {"both", "pose_only"}:
             self._load_preprocessors(require_real_densepose=False)
             base_parse, _ = self._parsing(base.resize((384, 512)))
+            base_parse_for_quality = base_parse
             base_bbox = person_bbox_from_parse(base_parse.resize((768, 1024), Image.NEAREST))
             base_keypoints = self._openpose(base.resize((384, 512)))
 
         if mode in {"both", "outfit_only"}:
-            print(f"Step 1/2: Outfit transfer using {selected_vton}...")
             if kind == "clothed_person":
-                vton_ref = self._garment_ref_from_clothed_person(ref, garment_type)
+                vton_ref, garment_analysis = self._garment_ref_from_clothed_person(ref, garment_type)
+                resolved_garment_type = garment_analysis.resolved_type
+                debug["garment_analysis"] = garment_analysis.to_dict()
                 debug["garment_ref"] = vton_ref.copy()
             else:
                 vton_ref = ref
+                resolved_garment_type = garment_type
+                debug["garment_analysis"] = {
+                    "requested_type": garment_type,
+                    "resolved_type": garment_type,
+                    "confidence": None,
+                    "reason": "flat garment photo; explicit selection",
+                }
+
+            selected_vton = _resolve_vton_model(resolved_garment_type, vt_model_type)
+            debug["resolved_garment_type"] = resolved_garment_type
+            debug["selected_vton_model"] = selected_vton
+            print(f"Step 1/2: Outfit transfer using {selected_vton} ({resolved_garment_type})...")
+
+            if base_parse_for_quality is None:
+                self._load_preprocessors(require_real_densepose=False)
+                base_parse_for_quality, _ = self._parsing(base.resize((384, 512)))
 
             current, vt_mask, vt_densepose, vt_debug = self._run_control_v2(
                 src_image=current,
@@ -220,13 +245,20 @@ class FidelityPoseClothPipeline(BasePoseClothPipeline):
                 seed=seed,
                 ref_acceleration=ref_acceleration,
                 vt_model_type=selected_vton,
-                vt_garment_type=garment_type,
+                vt_garment_type=resolved_garment_type,
             )
             debug.update(vt_debug)
             debug["outfit_mask"] = vt_mask
             debug["outfit_densepose"] = vt_densepose
             debug["after_vton"] = current.copy()
+            outfit_quality = assess_outfit_preservation(base, current, base_parse_for_quality)
+            debug["outfit_quality"] = outfit_quality.to_dict()
+            for warning in outfit_quality.warnings:
+                print(f"[outfit-quality] WARNING: {warning}")
             self._unload_diffusion()
+        else:
+            debug["selected_vton_model"] = "not used"
+            debug["resolved_garment_type"] = "not used"
 
         if mode in {"both", "pose_only"}:
             print("Step 2/2: Pose transfer with real DensePose...")

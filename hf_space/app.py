@@ -164,11 +164,18 @@ def _debug_gallery(debug: dict):
 
 def _status_text(debug: dict, internal_mode: str, require_pose: bool) -> str:
     selected = debug.get("selected_vton_model", "n/a")
+    resolved_garment = debug.get("resolved_garment_type", "n/a")
     parts = [
         f"**Completed:** `{internal_mode}`",
         f"VTON: `{selected}`",
+        f"Garment: `{resolved_garment}`",
         f"Pose DensePose: `{'real/required' if require_pose else 'not required'}`",
     ]
+
+    garment = debug.get("garment_analysis") or {}
+    confidence = garment.get("confidence")
+    if isinstance(confidence, (int, float)):
+        parts.append(f"Garment confidence: `{float(confidence):.2f}`")
 
     retarget = debug.get("pose_retarget_diagnostics") or {}
     if require_pose:
@@ -188,7 +195,13 @@ def _status_text(debug: dict, internal_mode: str, require_pose: bool) -> str:
             text += f" → `{after:.3f}`"
         parts.append(text)
 
-    return "  •  ".join(parts)
+    status = "  •  ".join(parts)
+    quality = debug.get("outfit_quality") or {}
+    warnings = quality.get("warnings") or []
+    if warnings:
+        warning_text = "<br>".join(f"⚠️ **Outfit fidelity warning:** {item}" for item in warnings)
+        status += "<br><br>" + warning_text
+    return status
 
 
 @spaces.GPU(duration=300)
@@ -215,6 +228,7 @@ def run_swap(
         "Pose only": "pose_only",
     }
     garment_map = {
+        "Auto detect (recommended)": "auto",
         "Upper body": "upper_body",
         "Lower body": "lower_body",
         "Dress / full outfit": "dresses",
@@ -270,9 +284,9 @@ def build_ui() -> gr.Blocks:
             # Poser Outfit Changer
             Keep the **base person's identity/body appearance** and copy clothes and/or pose from a reference person.
 
-            **Fidelity v2:** pose transfer uses real DensePose plus conservative OpenPose anatomy retargeting.
-            The retargeter changes the **pose control**, never stretches the final generated body. Identity lock
-            also reports InsightFace similarity and adapts correction strength while respecting head angle.
+            **Fidelity pipeline:** clothed-person references are parsed into garment-only inputs (never silently replaced
+            by the full donor person), garment type/model can be auto-routed, pose transfer requires real DensePose,
+            body proportions are retargeted on the pose control, and identity correction remains head-angle aware.
             """
         )
         with gr.Row():
@@ -286,9 +300,10 @@ def build_ui() -> gr.Blocks:
                 label="Mode",
             )
             garment = gr.Radio(
-                ["Upper body", "Lower body", "Dress / full outfit"],
-                value="Dress / full outfit",
+                ["Auto detect (recommended)", "Upper body", "Lower body", "Dress / full outfit"],
+                value="Auto detect (recommended)",
                 label="Clothes to copy",
+                info="Auto works with clothed-person references. Flat garment photos require an explicit region.",
             )
             ref_kind = gr.Radio(
                 ["Clothed person", "Flat garment photo"],
@@ -298,9 +313,9 @@ def build_ui() -> gr.Blocks:
 
         with gr.Accordion("Advanced", open=False):
             gr.Markdown(
-                "VTON model is selected automatically: VITON-HD for upper-body, "
-                "DressCode for lower/full outfit. Anatomy retargeting is safety-gated and is skipped "
-                "automatically if too few joints are visible or the required warp would be excessive."
+                "VTON routing is automatic after garment detection: VITON-HD for upper-body and DressCode for "
+                "lower/full outfits. Anatomy retargeting is safety-gated and skipped when landmark coverage or "
+                "the required warp is unsafe."
             )
             steps = gr.Slider(20, 50, value=30, step=1, label="Inference steps")
             guidance = gr.Slider(1.0, 5.0, value=2.5, step=0.1, label="Guidance scale")
