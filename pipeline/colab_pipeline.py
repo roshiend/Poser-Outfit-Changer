@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import gc
 import os
-from pathlib import Path
 from typing import Literal
 
 from .colab_lowmem import StagedLeffaInference
@@ -67,7 +66,41 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
         import torch
         from leffa.model import LeffaModel
 
-        print(f"[colab-lowmem] Building checkpoint with CPU-RAM safeguards: {weight_path}")
+        print(f"[colab-lowmem] Memory-mapped model load: {weight_path}")
+
+        # Preferred path: construct parameters on the meta device, memory-map the
+        # checkpoint, then assign checkpoint tensors directly. This avoids the
+        # normal peak where a full random SDXL model and a full loaded state dict
+        # coexist in Colab system RAM.
+        try:
+            from accelerate import init_empty_weights
+
+            with init_empty_weights(include_buffers=False):
+                model = LeffaModel(
+                    pretrained_model_name_or_path=pretrained_dir,
+                    pretrained_model="",
+                    dtype=self.dtype,
+                )
+            state = torch.load(
+                weight_path,
+                map_location="cpu",
+                mmap=True,
+                weights_only=True,
+            )
+            model.load_state_dict(state, strict=True, assign=True)
+            del state
+            model.eval()
+            gc.collect()
+            free_vram()
+            print("[colab-lowmem] Meta + mmap checkpoint load succeeded")
+            return model
+        except Exception as exc:
+            print(f"[colab-lowmem] Meta + mmap load unavailable; using half-init fallback: {exc!r}")
+            gc.collect()
+
+        # Compatibility fallback for torch/accelerate combinations where meta
+        # assignment is unavailable. Building directly in float16 still avoids
+        # the temporary float32 model used by upstream Leffa.
         original_load = torch.load
         original_dtype = torch.get_default_dtype()
 
@@ -75,17 +108,12 @@ class ColabAwareFidelityPipeline(FidelityPoseClothPipeline):
             base_kwargs = dict(kwargs)
             base_kwargs.setdefault("map_location", "cpu")
             optimized = dict(base_kwargs)
-            path_arg = args[0] if args else None
-            if isinstance(path_arg, (str, bytes, Path)):
-                optimized.setdefault("mmap", True)
-                optimized.setdefault("weights_only", True)
+            optimized.setdefault("mmap", True)
+            optimized.setdefault("weights_only", True)
             try:
                 obj = original_load(*args, **optimized)
-            except Exception as exc:
-                # Older torch/checkpoint combinations may not support mmap or
-                # weights_only. Retry with the normal CPU loader rather than
-                # making Colab setup brittle.
-                print(f"[colab-lowmem] mmap/weights-only load fallback: {exc!r}")
+            except Exception as load_exc:
+                print(f"[colab-lowmem] mmap/weights-only fallback: {load_exc!r}")
                 obj = original_load(*args, **base_kwargs)
             gc.collect()
             return obj
